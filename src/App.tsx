@@ -1,4 +1,4 @@
-import { HashRouter, Navigate, Route, Routes } from 'react-router-dom';
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import ProtectedRoute from './components/ProtectedRoute';
 import { AuthProvider } from './contexts/AuthContext';
 import AdminPage, { AdminDaysPage } from './pages/AdminPage';
@@ -12,7 +12,7 @@ import SignupPage from './pages/SignupPage';
 function App() {
   return (
     <AuthProvider>
-      <HashRouter>
+      <BrowserRouter basename="/gym-project">
         <Routes>
           {/* Public routes */}
           <Route path="/login" element={<LoginPage />} />
@@ -34,7 +34,7 @@ function App() {
           <Route path="/" element={<Navigate to="/programs" replace />} />
           <Route path="*" element={<Navigate to="/programs" replace />} />
         </Routes>
-      </HashRouter>
+      </BrowserRouter>
     </AuthProvider>
   );
 }
