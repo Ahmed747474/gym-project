@@ -44,7 +44,7 @@ jobs:
         run: npm run build
 
       - name: Add root redirect
-        run: cp root-redirect.html dist/index.html
+        run: cp root-redirect.html dist/404.html
 
       - name: Debug Supabase env
         run: |
