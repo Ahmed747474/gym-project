@@ -45,8 +45,7 @@ export default function AdminPage() {
   const [startDate, setStartDate] = useState(dayjs().format('YYYY-MM-DD'));
   const [endDate, setEndDate] = useState(dayjs().add(28, 'day').format('YYYY-MM-DD'));
   const [programDaysCount, setProgramDaysCount] = useState(4);
-  // Add state to store the days count for the selected program
-  const [selectedProgramDaysCount, setSelectedProgramDaysCount] = useState<number>(4);
+  // (Removed unused selectedProgramDaysCount state)
 
   useEffect(() => {
     if (!isAdmin) return;
@@ -57,14 +56,13 @@ export default function AdminPage() {
   useEffect(() => {
     const fetchDaysCount = async () => {
       if (!assignProgramId) {
-        setSelectedProgramDaysCount(4);
+        setProgramDaysCount(4);
         return;
       }
       const { count } = await supabase
         .from('days')
         .select('*', { count: 'exact', head: true })
         .eq('program_id', assignProgramId);
-      setSelectedProgramDaysCount(count || 4);
       setProgramDaysCount(count || 4);
     };
     fetchDaysCount();

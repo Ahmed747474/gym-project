@@ -99,7 +99,7 @@ export default function DayExercisesPage() {
     console.log('Toggling done:', { assignmentDayId, exerciseId, nextDone });
 
     // Upsert progress row
-    const { data, error } = await supabase
+    const { error } = await supabase
       .from('assignment_exercise_progress')
       .upsert({
         assignment_day_id: assignmentDayId,

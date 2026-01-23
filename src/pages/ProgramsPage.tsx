@@ -9,51 +9,7 @@ import { useAuth } from '../contexts/AuthContext';
 import type { Program } from '../lib/database.types';
 import { supabase } from '../lib/supabase';
 // Completion logic helpers
-async function processDayCompletion(assignment_day_id: string) {
-  // 1. Fetch assignment_day row
-  const { data: dayRow } = await supabase
-    .from('assignment_days')
-    .select('*')
-    .eq('id', assignment_day_id)
-    .maybeSingle();
-  if (!dayRow) return;
-  // 2. Fetch template exercises for this day
-  const { data: templateExercises } = await supabase
-    .from('program_day_exercises')
-    .select('exercise_id')
-    .eq('program_day_id', dayRow.program_day_id);
-  // 3. Fetch progress for this assignment_day_id
-  const { data: progressRows } = await supabase
-    .from('assignment_exercise_progress')
-    .select('exercise_id, done')
-    .eq('assignment_day_id', assignment_day_id);
-  // 4. Check if all template exercises are done
-  const allDone = templateExercises && templateExercises.length > 0 &&
-    templateExercises.every(ex => progressRows?.find(p => p.exercise_id === ex.exercise_id && p.done));
-  // 5. Update assignment_days.status
-  await supabase
-    .from('assignment_days')
-    .update({
-      status: allDone ? 'done' : 'pending',
-      completed_at: allDone ? new Date().toISOString() : null
-    })
-    .eq('id', assignment_day_id);
-  // 6. Trigger repeat and program completion logic
-  await processRepeatCompletion(dayRow.assignment_id, dayRow.repeat_no);
-}
 
-async function processRepeatCompletion(assignment_id: string, repeat_no: number) {
-  // Fetch all assignment_days for this repeat
-  const { data: days } = await supabase
-    .from('assignment_days')
-    .select('status')
-    .eq('assignment_id', assignment_id)
-    .eq('repeat_no', repeat_no);
-  const repeatDone = days && days.length > 0 && days.every(d => d.status === 'done');
-  // No DB change needed, but can update UI header progress if needed
-  // Trigger program completion logic
-  await processProgramCompletion(assignment_id);
-}
 
 async function processProgramCompletion(assignment_id: string) {
   // Fetch assignment row
@@ -165,7 +121,7 @@ function NumberCircle({ labelText, subLabel }: { labelText: string; subLabel?: s
   );
 }
 
-function RepeatBadgesRow({ totalRepeats, completedRepeats, currentRepeatNo }: { totalRepeats: number; completedRepeats: number; currentRepeatNo: number }) {
+function RepeatBadgesRow({ totalRepeats, completedRepeats }: { totalRepeats: number; completedRepeats: number; currentRepeatNo: number }) {
   const badges = [];
   for (let i = 1; i <= totalRepeats; i++) {
     if (i <= completedRepeats) {
@@ -189,52 +145,6 @@ function RepeatBadgesRow({ totalRepeats, completedRepeats, currentRepeatNo }: { 
   return <div className="flex flex-row items-center mt-2">{badges}</div>;
 }
 
-function SegmentedProgressCircle({ days }: { days: Array<{ status: string }> }) {
-  const total = days.length;
-  const radius = 12;
-  const circumference = 2 * Math.PI * radius;
-  let offset = 0;
-  const colorMap: Record<string, string> = {
-    done: '#22c55e',
-    missed: '#ef4444',
-    pending: '#a1a1aa',
-  };
-  return (
-    <svg width="40" height="40" viewBox="0 0 36 36">
-      <circle cx="18" cy="18" r="12" fill="#334155" />
-      {days.map((day, i) => {
-        const segLength = circumference / total;
-        const dasharray = `${segLength} ${circumference - segLength}`;
-        const dashoffset = offset;
-        offset += segLength;
-        return (
-          <circle
-            key={i}
-            cx="18"
-            cy="18"
-            r="12"
-            fill="none"
-            stroke={colorMap[day.status] || '#a1a1aa'}
-            strokeWidth="4"
-            strokeDasharray={dasharray}
-            strokeDashoffset={-dashoffset}
-          />
-        );
-      })}
-    </svg>
-  );
-}
-
-function ProgressCircle({ done, total }: { done: number; total: number }) {
-  const percentDone = total ? (done / total) * 100 : 0;
-  return (
-    <svg width="40" height="40" viewBox="0 0 36 36">
-      <circle cx="18" cy="18" r="12" fill="#334155" />
-      <circle cx="18" cy="18" r="12" fill="none" stroke="#22c55e" strokeWidth="4" strokeDasharray={`${percentDone} ${100 - percentDone}`} strokeDashoffset="25" />
-      <text x="18" y="22" textAnchor="middle" fontSize="12" fill="#fff">{done}/{total}</text>
-    </svg>
-  );
-}
 
 export default function ProgramsPage() {
   const [programs, setPrograms] = useState<Program[]>([]);
@@ -404,7 +314,6 @@ export default function ProgramsPage() {
               // --- Compute repeat progress data ---
               const totalRepeats = assignment.target_cycles || assignment.max_cycles || 1;
               const programDaysCount = assignment.program_days_count || 1;
-              const days = progress?.cycle?.days || [];
               // Find current repeat info
               let currentRepeatNo = progress?.cycle?.currentRepeatNo || 1;
               let completedRepeats = progress?.overall?.completedCycles || 0;
@@ -468,7 +377,6 @@ export default function ProgramsPage() {
                 const programDaysCount = assignment.program_days_count || 1;
                 // No progress, so all zeros
                 const doneDays = 0;
-                const missedDays = 0;
                 const totalDays = programDaysCount;
                 const redoRatio = 0;
                 const doneRatio = 0;
