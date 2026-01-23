@@ -149,7 +149,7 @@ function RepeatBadgesRow({ totalRepeats, completedRepeats }: { totalRepeats: num
 export default function ProgramsPage() {
   const [programs, setPrograms] = useState<Program[]>([]);
   const [loading, setLoading] = useState(true);
-  const { user, loading: authLoading, session, isAdmin } = useAuth();
+  const { user, loading: authLoading, session } = useAuth();
   const [assignments, setAssignments] = useState<Record<string, any>>({});
   const [progresses, setProgresses] = useState<Record<string, any>>({});
   const [queuedAssignments, setQueuedAssignments] = useState<any[]>([]);
