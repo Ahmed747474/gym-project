@@ -41,6 +41,17 @@ export default function AdminPage() {
   const [assignments, setAssignments] = useState<any[]>([]);
   const [programMap, setProgramMap] = useState<Record<string, Program>>({});
   const [showQueued, setShowQueued] = useState(false);
+  const [detailsModal, setDetailsModal] = useState<{
+    open: boolean;
+    assignment?: any;
+    loading?: boolean;
+    assignmentDays?: any[];
+    daysMap?: Record<string, any>;
+    stats?: any;
+    selectedAssignmentDayId?: string | null;
+    exercisesCache?: Record<string, any[]>;
+    showExercises?: boolean;
+  } | null>(null);
   const [removeModal, setRemoveModal] = useState<{ open: boolean; assignment?: any; user?: Profile; error?: string } | null>(null);
   const [reactivateModal, setReactivateModal] = useState<{ open: boolean; assignment?: any; error?: string } | null>(null);
   
@@ -146,6 +157,106 @@ useEffect(() => {
     const map: Record<string, Program> = {};
     for (const p of programsData || []) map[p.id] = p;
     setProgramMap(map);
+  };
+
+  // Details / Progress helpers
+  const openDetails = async (assignment: any) => {
+    setDetailsModal({ open: true, assignment, loading: true });
+    try {
+      const { data: assignmentDaysData } = await supabase
+        .from('assignment_days')
+        .select('id,scheduled_date,repeat_no,day_index,status,program_day_id')
+        .eq('assignment_id', assignment.id)
+        .order('scheduled_date', { ascending: true });
+
+      const assignmentDays = (assignmentDaysData || []) as any[];
+      const programDayIds = Array.from(new Set(assignmentDays.map(d => d.program_day_id).filter(Boolean)));
+
+      let daysMap: Record<string, any> = {};
+      if (programDayIds.length > 0) {
+        const { data: daysData } = await supabase
+          .from('days')
+          .select('id,title,day_number')
+          .in('id', programDayIds as string[]);
+        for (const d of daysData || []) daysMap[d.id] = d;
+      }
+
+      // Compute stats
+      const maxCycles = assignment.max_cycles || assignment.target_cycles || 1;
+      const byRepeat: Record<number, any[]> = {};
+      for (const d of assignmentDays) {
+        const r = d.repeat_no || 1;
+        byRepeat[r] = byRepeat[r] || [];
+        byRepeat[r].push(d);
+      }
+
+      let completedRepeats = 0;
+      for (let r = 1; r <= maxCycles; r++) {
+        const repeatDays = byRepeat[r] || [];
+        if (repeatDays.length > 0 && repeatDays.every((x: any) => x.status === 'done')) completedRepeats++;
+      }
+
+      // currentRepeatNo = smallest repeat where not all days done
+      let currentRepeatNo = maxCycles;
+      for (let r = 1; r <= maxCycles; r++) {
+        const repeatDays = byRepeat[r] || [];
+        if (repeatDays.length === 0) {
+          currentRepeatNo = r;
+          break;
+        }
+        if (!repeatDays.every((x: any) => x.status === 'done')) {
+          currentRepeatNo = r;
+          break;
+        }
+      }
+
+      const currentRepeatDays = byRepeat[currentRepeatNo] || [];
+      const currentDone = currentRepeatDays.filter((d:any)=>d.status==='done').length;
+      const currentMissed = currentRepeatDays.filter((d:any)=>d.status==='missed').length;
+      const currentTotal = currentRepeatDays.length;
+
+      const stats = {
+        maxCycles,
+        completedRepeats,
+        currentRepeatNo,
+        currentDone,
+        currentMissed,
+        currentTotal,
+        byRepeat,
+      };
+
+      setDetailsModal({ open: true, assignment, loading: false, assignmentDays, daysMap, stats, selectedAssignmentDayId: null, exercisesCache: {}, showExercises: false });
+    } catch (err) {
+      console.error('Error loading assignment details', err);
+      setDetailsModal({ open: true, assignment, loading: false, assignmentDays: [], daysMap: {}, stats: null, selectedAssignmentDayId: null, exercisesCache: {}, showExercises: false });
+    }
+  };
+
+  const closeDetails = () => setDetailsModal(null);
+
+  const fetchExercisesForAssignmentDay = async (assignmentDayId: string, programDayId: string) => {
+    if (!detailsModal) return;
+    const cache = detailsModal.exercisesCache || {};
+    if (cache[assignmentDayId]) return; // already loaded
+    // fetch template exercises and progress
+    const { data: exercisesData } = await supabase
+      .from('exercises')
+      .select('*')
+      .eq('day_id', programDayId)
+      .order('exercise_number');
+
+    const { data: progressData } = await supabase
+      .from('assignment_exercise_progress')
+      .select('*')
+      .eq('assignment_day_id', assignmentDayId);
+
+    const progressMap: Record<string, any> = {};
+    for (const p of (progressData || [])) progressMap[p.exercise_id] = p;
+
+    const merged = (exercisesData || []).map((ex: any) => ({ ...ex, progress: progressMap[ex.id] || null }));
+
+    const newCache = { ...(detailsModal.exercisesCache || {}), [assignmentDayId]: merged };
+    setDetailsModal({ ...detailsModal, exercisesCache: newCache });
   };
 
   
@@ -384,6 +495,7 @@ useEffect(() => {
                   <td className="px-4 py-2">{a.assigned_at ? new Date(a.assigned_at).toLocaleString() : a.created_at ? new Date(a.created_at).toLocaleString() : '-'}</td>
                   <td className="px-4 py-2">
                     <div className="flex gap-2">
+                      <button onClick={() => openDetails(a)} className="px-3 py-1 bg-blue-600 text-white rounded">Details / Progress</button>
                       {a.state === 'archived' ? (
                         <button onClick={() => setReactivateModal({ open: true, assignment: a })} className="px-3 py-1 bg-green-600 text-white rounded">Reactivate</button>
                       ) : (
@@ -735,6 +847,130 @@ useEffect(() => {
               <button onClick={() => setReactivateModal(null)} className="flex-1 py-2 bg-slate-700 text-white rounded">Cancel</button>
             </div>
             {reactivateModal.error && <p className="text-red-400 mt-3">{reactivateModal.error}</p>}
+          </div>
+        </div>
+      )}
+
+      {detailsModal?.open && (
+        <div className="fixed inset-0 bg-black/60 flex justify-end z-50">
+          <div className="bg-slate-900 w-full md:w-2/3 lg:w-1/2 max-h-screen overflow-y-auto p-6 relative">
+            <button onClick={closeDetails} className="absolute top-4 right-4 text-slate-400 hover:text-white">Close ×</button>
+            <div className="mb-8">
+              <h3 className="text-lg font-bold text-white">Assignment Details & Progress</h3>
+            </div>
+            {detailsModal.loading ? (
+              <LoadingSpinner />
+            ) : (
+              <div className="space-y-4">
+                <div className="bg-slate-800 rounded p-4">
+                  <h4 className="text-sm text-slate-300 mb-2">User</h4>
+                  <p className="text-white">{users.find(u => u.id === detailsModal.assignment?.user_id)?.full_name || detailsModal.assignment?.user_email || detailsModal.assignment?.user_id}</p>
+                  <p className="text-sm text-slate-500">{users.find(u => u.id === detailsModal.assignment?.user_id)?.email || ''}</p>
+                </div>
+
+                <div className="bg-slate-800 rounded p-4">
+                  <h4 className="text-sm text-slate-300 mb-2">Program</h4>
+                  <p className="text-white">{programMap[detailsModal.assignment?.program_id]?.title || detailsModal.assignment?.program_id}</p>
+                </div>
+
+                <div className="bg-slate-800 rounded p-4">
+                  <h4 className="text-sm text-slate-300 mb-2">Assignment</h4>
+                  <div className="grid grid-cols-2 gap-2 text-sm text-slate-300">
+                    <div>State:</div><div className="text-white">{detailsModal.assignment?.state}</div>
+                    <div>Start:</div><div className="text-white">{detailsModal.assignment?.start_date || detailsModal.assignment?.assigned_at || '-'}</div>
+                    <div>End:</div><div className="text-white">{detailsModal.assignment?.end_date || '-'}</div>
+                    <div>Program days:</div><div className="text-white">{detailsModal.assignment?.program_days_count || '-'}</div>
+                    <div>Max cycles:</div><div className="text-white">{detailsModal.stats?.maxCycles || detailsModal.assignment?.max_cycles || detailsModal.assignment?.target_cycles || 1}</div>
+                    <div>Activated:</div><div className="text-white">{detailsModal.assignment?.activated_at || '-'}</div>
+                    <div>Queued at:</div><div className="text-white">{detailsModal.assignment?.queued_at || '-'}</div>
+                    <div>Archived at:</div><div className="text-white">{detailsModal.assignment?.archived_at || '-'}</div>
+                  </div>
+                </div>
+
+                <div className="bg-slate-800 rounded p-4">
+                  <h4 className="text-sm text-slate-300 mb-2">Progress</h4>
+                  <div className="mb-2 text-sm text-slate-300">Overall repeats: <span className="text-white">{detailsModal.stats?.completedRepeats || 0}</span> / <span className="text-white">{detailsModal.stats?.maxCycles || 1}</span></div>
+                  <div className="mb-2 text-sm text-slate-300">Current repeat: <span className="text-white">{detailsModal.stats?.currentRepeatNo || 1}</span></div>
+                  <div className="mb-2 text-sm text-slate-300">Repeat progress: <span className="text-white">{detailsModal.stats?.currentDone || 0}</span> / <span className="text-white">{detailsModal.stats?.currentTotal || 0}</span> (missed: <span className="text-red-400">{detailsModal.stats?.currentMissed || 0}</span>)</div>
+                  <div className="flex items-center gap-3 mt-3">
+                    <label className="flex items-center gap-2 text-sm text-slate-300">
+                      <input
+                        type="checkbox"
+                        checked={!!detailsModal.showExercises}
+                        onChange={async () => {
+                          const newShow = !detailsModal.showExercises;
+                          // If enabling and there's a selected day, fetch exercises for it
+                          if (newShow && detailsModal.selectedAssignmentDayId) {
+                            const ad = detailsModal.assignmentDays?.find(d => d.id === detailsModal.selectedAssignmentDayId);
+                            if (ad) await fetchExercisesForAssignmentDay(ad.id, ad.program_day_id);
+                          }
+                          // If enabling and no selected day, auto-select first assignment day (if any)
+                          if (newShow && !detailsModal.selectedAssignmentDayId && detailsModal.assignmentDays?.length) {
+                            const first = detailsModal.assignmentDays[0];
+                            await fetchExercisesForAssignmentDay(first.id, first.program_day_id);
+                            setDetailsModal({ ...detailsModal, showExercises: newShow, selectedAssignmentDayId: first.id });
+                            return;
+                          }
+                          setDetailsModal({ ...detailsModal, showExercises: newShow });
+                        }}
+                      />
+                      Show exercises progress
+                    </label>
+                  </div>
+                </div>
+
+                <div className="bg-slate-800 rounded p-4">
+                  <h4 className="text-sm text-slate-300 mb-2">Repeats & Days</h4>
+                  <div className="space-y-3">
+                    {Object.keys(detailsModal.stats?.byRepeat || {}).sort((a,b)=>Number(a)-Number(b)).map((rKey) => (
+                      <div key={rKey} className="bg-slate-700/40 rounded p-3">
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="text-sm text-slate-300">Repeat {rKey}</div>
+                          <div className="text-xs text-slate-400">{(detailsModal.stats?.byRepeat?.[rKey] || []).length} days</div>
+                        </div>
+                        <div className="grid gap-2">
+                          {(detailsModal.stats?.byRepeat?.[rKey] || []).map((d: any) => (
+                            <div key={d.id} className="flex items-center justify-between bg-slate-800 rounded p-2">
+                              <div>
+                                <div className="text-white text-sm">{d.scheduled_date ? new Date(d.scheduled_date).toLocaleDateString() : '-'}</div>
+                                <div className="text-slate-400 text-xs">Day index: {d.day_index || '-' } • {detailsModal.daysMap?.[d.program_day_id]?.title || 'Template day'}</div>
+                              </div>
+                              <div className="flex items-center gap-3">
+                                <button onClick={async () => { setDetailsModal({ ...detailsModal, selectedAssignmentDayId: d.id }); if (detailsModal.showExercises) await fetchExercisesForAssignmentDay(d.id, d.program_day_id); }} className="text-sm px-2 py-1 bg-slate-700 rounded text-slate-200">Select</button>
+                                <span className={`px-3 py-1 rounded text-xs ${d.status === 'done' ? 'bg-green-600 text-white' : d.status === 'missed' ? 'bg-red-600 text-white' : 'bg-slate-600 text-slate-200'}`}>{d.status || 'pending'}</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {detailsModal.showExercises && detailsModal.selectedAssignmentDayId && (
+                  <div className="bg-slate-800 rounded p-4">
+                    <h4 className="text-sm text-slate-300 mb-2">Exercises for selected day</h4>
+                    {detailsModal.exercisesCache?.[detailsModal.selectedAssignmentDayId]?.length ? (
+                      <div className="space-y-2">
+                        {detailsModal.exercisesCache[detailsModal.selectedAssignmentDayId].map((ex: any) => (
+                          <div key={ex.id} className="flex items-center justify-between bg-slate-700/50 rounded p-2">
+                            <div>
+                              <div className="text-white">#{ex.exercise_number} {ex.name}</div>
+                              <div className="text-slate-400 text-xs">{ex.sets}×{ex.reps}</div>
+                            </div>
+                            <div className="text-sm">
+                              {ex.progress?.done ? <span className="text-green-400">Done</span> : <span className="text-slate-300">Pending</span>}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="text-slate-400">No exercises loaded. Select a day and click Select to load exercises.</div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
