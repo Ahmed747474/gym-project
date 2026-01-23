@@ -149,7 +149,7 @@ function RepeatBadgesRow({ totalRepeats, completedRepeats }: { totalRepeats: num
 export default function ProgramsPage() {
   const [programs, setPrograms] = useState<Program[]>([]);
   const [loading, setLoading] = useState(true);
-  const { user, loading: authLoading, session } = useAuth();
+  const { user, loading: authLoading, session, isAdmin } = useAuth();
   const [assignments, setAssignments] = useState<Record<string, any>>({});
   const [progresses, setProgresses] = useState<Record<string, any>>({});
   const [queuedAssignments, setQueuedAssignments] = useState<any[]>([]);
@@ -452,13 +452,15 @@ export default function ProgramsPage() {
                   />
                   <span className="text-xs text-green-500 font-bold">100% Complete</span>
                 </div>
-                <button
-                  className={`mt-2 px-3 py-1 rounded bg-blue-600 text-white text-xs font-bold hover:bg-blue-700 transition ${isCompleted ? '' : 'opacity-60 pointer-events-none'}`}
-                  onClick={() => setReactivateModal({ open: true, assignment })}
-                  disabled={!isCompleted}
-                >
-                  Reactivate
-                </button>
+                {/* {isAdmin && (
+                  <button
+                    className={`mt-2 px-3 py-1 rounded bg-blue-600 text-white text-xs font-bold hover:bg-blue-700 transition ${isCompleted ? '' : 'opacity-60 pointer-events-none'}`}
+                    onClick={() => setReactivateModal({ open: true, assignment })}
+                    disabled={!isCompleted}
+                  >
+                    Reactivate
+                  </button>
+                )} */}
               </div>
             );
           })}

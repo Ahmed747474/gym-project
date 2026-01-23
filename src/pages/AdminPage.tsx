@@ -7,7 +7,7 @@ import { useAuth } from '../contexts/AuthContext';
 import type { Day, Exercise, Profile, Program } from '../lib/database.types';
 import { createUserProgramAssignment, supabase } from '../lib/supabase';
 
-type Tab = 'programs' | 'users' | 'assignments';
+type Tab = 'programs' | 'users' | 'assignments' | 'manage-assignments';
 
 export default function AdminPage() {
   const { isAdmin } = useAuth();
@@ -38,6 +38,12 @@ export default function AdminPage() {
   const [exerciseRest, setExerciseRest] = useState('60');
   const [exerciseNotes, setExerciseNotes] = useState('');
   const [exerciseVideoUrl, setExerciseVideoUrl] = useState('');
+  const [assignments, setAssignments] = useState<any[]>([]);
+  const [programMap, setProgramMap] = useState<Record<string, Program>>({});
+  const [showQueued, setShowQueued] = useState(false);
+  const [removeModal, setRemoveModal] = useState<{ open: boolean; assignment?: any; user?: Profile; error?: string } | null>(null);
+  const [reactivateModal, setReactivateModal] = useState<{ open: boolean; assignment?: any; error?: string } | null>(null);
+  
 
   // Assignment
   const [assignUserId, setAssignUserId] = useState('');
@@ -51,9 +57,20 @@ export default function AdminPage() {
     if (!isAdmin) return;
     fetchData();
   }, [isAdmin]);
-
+useEffect(() => {
+    if (!isAdmin) return;
+    const fetchUsers = async () => {
+      const { data: usersData } = await supabase
+        .from('profiles')
+        .select('*');
+      setUsers((usersData as Profile[]) || []);
+    };
+    fetchUsers();
+    fetchAssignments();
+  }, [isAdmin, showQueued]);
   // Fetch days count when assignProgramId changes
   useEffect(() => {
+    
     const fetchDaysCount = async () => {
       if (!assignProgramId) {
         setProgramDaysCount(4);
@@ -68,6 +85,70 @@ export default function AdminPage() {
     fetchDaysCount();
   }, [assignProgramId]);
 
+
+  // Hard delete assignment
+  const hardDeleteAssignment = async (assignmentId: string) => {
+    // 1. Get all assignment_days for this assignment
+    const { data: days } = await supabase
+      .from('assignment_days')
+      .select('id')
+      .eq('assignment_id', assignmentId);
+    const dayIds = (days || []).map((d: any) => d.id);
+    // 2. Delete assignment_exercise_progress for those days
+    if (dayIds.length > 0) {
+      await supabase
+        .from('assignment_exercise_progress')
+        .delete()
+        .in('assignment_day_id', dayIds);
+    }
+    // 3. Delete assignment_days
+    await supabase
+      .from('assignment_days')
+      .delete()
+      .eq('assignment_id', assignmentId);
+    // 4. Delete assignment
+    await supabase
+      .from('user_program_assignments')
+      .delete()
+      .eq('id', assignmentId);
+    setRemoveModal(null);
+    fetchAssignments();
+  };
+  // Soft delete assignment
+  const softDeleteAssignment = async (assignmentId: string) => {
+    await supabase
+      .from('user_program_assignments')
+      .update({ state: 'archived', archived_at: new Date().toISOString() })
+      .eq('id', assignmentId);
+    setRemoveModal(null);
+    fetchAssignments();
+  };
+
+  // Reactivate archived assignment
+  const reactivateAssignment = async (assignmentId: string) => {
+    await supabase
+      .from('user_program_assignments')
+      .update({ state: 'active', activated_at: new Date().toISOString(), archived_at: null })
+      .eq('id', assignmentId);
+    fetchAssignments();
+  };
+  const fetchAssignments = async () => {
+    // Fetch assignments (active or queued)
+    const { data: assignmentsData } = await supabase
+      .from('user_program_assignments')
+      .select('*')
+      .in('state', showQueued ? ['active', 'queued'] : ['active','archived']);
+    setAssignments(assignmentsData || []);
+    // Fetch programs
+    const { data: programsData } = await supabase
+      .from('programs')
+      .select('*');
+    const map: Record<string, Program> = {};
+    for (const p of programsData || []) map[p.id] = p;
+    setProgramMap(map);
+  };
+
+  
   const fetchData = async () => {
     setLoading(true);
     // Fetch programs
@@ -185,10 +266,13 @@ export default function AdminPage() {
 
   return (
     <Layout title="Admin Panel">
+        <Link to="/programs" className="text-blue-400 mt-4 inline-block">
+            Back to Programs
+          </Link>
       <div className="p-4 pb-20">
         {/* Tabs */}
         <div className="flex gap-2 mb-6 overflow-x-auto">
-          {(['programs', 'users', 'assignments'] as Tab[]).map((tab) => (
+          {(['programs', 'users', 'assignments','manage-assignments'] as Tab[]).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -268,7 +352,55 @@ export default function AdminPage() {
             )}
           </div>
         )}
+{activeTab === 'manage-assignments' && (
 
+  <div>
+      <div className="mb-4 flex items-center justify-between">
+          <h2 className="text-lg font-semibold text-white">Assignments</h2>
+          <label className="flex items-center gap-2 text-sm text-slate-300">
+            <input type="checkbox" checked={showQueued} onChange={() => setShowQueued(v => !v)} />
+            Show queued
+          </label>
+        </div>
+          <div className="overflow-auto bg-slate-800 rounded-lg p-2">
+          <table className="min-w-full text-left">
+            <thead>
+              <tr className="text-slate-400 text-sm">
+                <th className="px-4 py-2">User</th>
+                <th className="px-4 py-2">Program</th>
+                <th className="px-4 py-2">State</th>
+                <th className="px-4 py-2">Assigned</th>
+                <th className="px-4 py-2">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {assignments.map((a: any) => (
+                <tr key={a.id} className="border-t border-slate-700">
+                  <td className="px-4 py-2">
+                    {users.find(u => u.id === a.user_id)?.email || a.user_email || a.user_id}
+                  </td>
+                  <td className="px-4 py-2">{programMap[a.program_id]?.title || '—'}</td>
+                  <td className="px-4 py-2">{a.state}</td>
+                  <td className="px-4 py-2">{a.assigned_at ? new Date(a.assigned_at).toLocaleString() : a.created_at ? new Date(a.created_at).toLocaleString() : '-'}</td>
+                  <td className="px-4 py-2">
+                    <div className="flex gap-2">
+                      {a.state === 'archived' ? (
+                        <button onClick={() => setReactivateModal({ open: true, assignment: a })} className="px-3 py-1 bg-green-600 text-white rounded">Reactivate</button>
+                      ) : (
+                        <button onClick={() => setRemoveModal({ open: true, assignment: a })} className="px-3 py-1 bg-yellow-600 text-white rounded">Archive</button>
+                      )}
+                      <button onClick={() => setRemoveModal({ open: true, assignment: a, error: undefined })} className="px-3 py-1 bg-red-600 text-white rounded">Delete</button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+  </div>
+  
+
+)}     
         {/* Users Tab */}
         {activeTab === 'users' && (
           <div>
@@ -579,6 +711,34 @@ export default function AdminPage() {
           </div>
         </div>
       )}
+      {removeModal?.open && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+          <div className="bg-slate-800 rounded-lg p-6 w-full max-w-md">
+            <h3 className="text-lg font-bold text-white mb-4">Remove Assignment</h3>
+            <p className="text-slate-300 mb-4">Choose "Archive" to soft-delete (recommended) or "Delete" to permanently remove assignment and its data.</p>
+            <div className="flex gap-3">
+              <button onClick={() => { if (removeModal.assignment) softDeleteAssignment(removeModal.assignment.id); }} className="flex-1 py-2 bg-yellow-600 text-white rounded">Archive</button>
+              <button onClick={() => { if (removeModal.assignment) hardDeleteAssignment(removeModal.assignment.id); }} className="flex-1 py-2 bg-red-600 text-white rounded">Delete</button>
+              <button onClick={() => setRemoveModal(null)} className="flex-1 py-2 bg-slate-700 text-white rounded">Cancel</button>
+            </div>
+            {removeModal.error && <p className="text-red-400 mt-3">{removeModal.error}</p>}
+          </div>
+        </div>
+      )}
+      {reactivateModal?.open && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+          <div className="bg-slate-800 rounded-lg p-6 w-full max-w-md">
+            <h3 className="text-lg font-bold text-white mb-4">Reactivate Assignment</h3>
+            <p className="text-slate-300 mb-4">Reactivating will set this assignment back to active for the user. Continue?</p>
+            <div className="flex gap-3">
+              <button onClick={() => { if (reactivateModal.assignment) { reactivateAssignment(reactivateModal.assignment.id); setReactivateModal(null); } }} className="flex-1 py-2 bg-green-600 text-white rounded">Reactivate</button>
+              <button onClick={() => setReactivateModal(null)} className="flex-1 py-2 bg-slate-700 text-white rounded">Cancel</button>
+            </div>
+            {reactivateModal.error && <p className="text-red-400 mt-3">{reactivateModal.error}</p>}
+          </div>
+        </div>
+      )}
+
     </Layout>
   );
 }
