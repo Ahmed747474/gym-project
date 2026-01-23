@@ -3,13 +3,12 @@ import { useNavigate, useParams } from 'react-router-dom';
 import Layout from '../components/Layout';
 import LoadingSpinner from '../components/LoadingSpinner';
 import { useAuth } from '../contexts/AuthContext';
-import type { Day, Exercise, ExerciseProgress } from '../lib/database.types';
+import type { Day, Exercise } from '../lib/database.types';
 import { supabase } from '../lib/supabase';
 
 // Helper to convert Google Drive share link to embed URL
 function getDriveEmbedUrl(shareUrl: string): string | null {
   if (!shareUrl) return null;
-  
   // Extract file ID from various Google Drive URL formats
   const patterns = [
     /\/file\/d\/([a-zA-Z0-9_-]+)/,
@@ -17,13 +16,13 @@ function getDriveEmbedUrl(shareUrl: string): string | null {
     /\/d\/([a-zA-Z0-9_-]+)/,
   ];
 
+
   for (const pattern of patterns) {
     const match = shareUrl.match(pattern);
     if (match) {
       return `https://drive.google.com/file/d/${match[1]}/preview`;
     }
   }
-  
   return null;
 }
 
@@ -37,23 +36,44 @@ function getDriveOpenUrl(shareUrl: string): string {
 }
 
 export default function ExercisePlayerPage() {
-  const { programId, dayId, exerciseId } = useParams<{ 
-    programId: string; 
-    dayId: string; 
+  // Expect programId, assignmentDayId, exerciseId in route
+  const { programId, assignmentDayId, exerciseId } = useParams<{ 
+    programId: string;
+    assignmentDayId: string;
     exerciseId: string;
   }>();
   const navigate = useNavigate();
   const { user } = useAuth();
   const [exercise, setExercise] = useState<Exercise | null>(null);
   const [day, setDay] = useState<Day | null>(null);
-  const [progress, setProgress] = useState<ExerciseProgress | null>(null);
+  const [progress, setProgress] = useState<any | null>(null);
   const [allExercises, setAllExercises] = useState<Exercise[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
   useEffect(() => {
     const fetchExercise = async () => {
-      if (!exerciseId || !dayId || !user) return;
+      if (!exerciseId || !assignmentDayId || !user) return;
+
+      // Fetch assignment_day
+      const { data: assignmentDay, error: adError } = await supabase
+        .from('assignment_days')
+        .select('*')
+        .eq('id', assignmentDayId)
+        .single();
+      if (adError || !assignmentDay) {
+        setError('Assignment day not found');
+        setLoading(false);
+        return;
+      }
+
+      // Fetch day (program_day)
+      const { data: dayData } = await supabase
+        .from('days')
+        .select('*')
+        .eq('id', assignmentDay.program_day_id)
+        .single();
+      setDay(dayData);
 
       // Fetch exercise
       const { data: exerciseData, error: exerciseError } = await supabase
@@ -61,79 +81,86 @@ export default function ExercisePlayerPage() {
         .select('*')
         .eq('id', exerciseId)
         .single();
-
       if (exerciseError) {
         setError('Exercise not found');
         setLoading(false);
         return;
       }
-
       setExercise(exerciseData);
-
-      // Fetch day
-      const { data: dayData } = await supabase
-        .from('days')
-        .select('*')
-        .eq('id', dayId)
-        .single();
-
-      setDay(dayData);
 
       // Fetch all exercises in this day for navigation
       const { data: allExercisesData } = await supabase
         .from('exercises')
         .select('*')
-        .eq('day_id', dayId)
+        .eq('day_id', assignmentDay.program_day_id)
         .order('exercise_number');
-
       setAllExercises(allExercisesData || []);
 
-      // Fetch progress
-      const { data: progressData } = await supabase
-        .from('exercise_progress')
+      // Fetch progress for this assignment_day and exercise
+      let progressData = null;
+      const { data: progressRow } = await supabase
+        .from('assignment_exercise_progress')
         .select('*')
-        .eq('user_id', user.id)
+        .eq('assignment_day_id', assignmentDayId)
         .eq('exercise_id', exerciseId)
-        .single();
-
+        .maybeSingle();
+      progressData = progressRow;
       setProgress(progressData);
       setLoading(false);
     };
-
     fetchExercise();
-  }, [exerciseId, dayId, user]);
+  }, [exerciseId, assignmentDayId, user]);
 
   const toggleDone = async () => {
-    if (!user || !exercise) return;
+    if (!user || !exercise || !assignmentDayId) return;
 
+    // Toggle progress for this assignment_day and exercise
     if (progress) {
-      // Remove progress
       await supabase
-        .from('exercise_progress')
+        .from('assignment_exercise_progress')
         .delete()
         .eq('id', progress.id);
       setProgress(null);
     } else {
-      // Add progress
       const { data } = await supabase
-        .from('exercise_progress')
+        .from('assignment_exercise_progress')
         .insert({
-          user_id: user.id,
+          assignment_day_id: assignmentDayId,
           exercise_id: exercise.id,
+          done: true,
+          done_at: new Date().toISOString(),
         } as any)
         .select()
         .single();
       setProgress(data as any);
     }
+
+    // After toggling, check if all exercises for this assignment_day are done
+    const { data: exercises } = await supabase
+      .from('exercises')
+      .select('id')
+      .eq('day_id', day?.id);
+    if (!exercises) return;
+    const exerciseIds = exercises.map((e: any) => e.id);
+    const { data: allProgress } = await supabase
+      .from('assignment_exercise_progress')
+      .select('exercise_id')
+      .eq('assignment_day_id', assignmentDayId);
+    const doneIds = new Set((allProgress || []).map((p: any) => p.exercise_id));
+    const allDone = exerciseIds.length > 0 && exerciseIds.every((id: string) => doneIds.has(id));
+    await supabase
+      .from('assignment_days')
+      .update({ status: allDone ? 'done' : 'pending' })
+      .eq('id', assignmentDayId);
   };
+
 
   const navigateToExercise = (direction: 'prev' | 'next') => {
     if (!exercise) return;
     const currentIndex = allExercises.findIndex(e => e.id === exercise.id);
     const newIndex = direction === 'prev' ? currentIndex - 1 : currentIndex + 1;
-    
     if (newIndex >= 0 && newIndex < allExercises.length) {
-      navigate(`/programs/${programId}/days/${dayId}/exercises/${allExercises[newIndex].id}`);
+      navigate(`/programs/${programId}/days/${assignmentDayId}/exercises/${allExercises[newIndex].id}`);
     }
   };
 

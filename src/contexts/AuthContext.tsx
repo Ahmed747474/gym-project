@@ -67,6 +67,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               'apikey': supabaseKey,
               'Authorization': `Bearer ${accessToken}`,
               'Content-Type': 'application/json',
+              'Accept': 'application/json',
             },
           }
         );

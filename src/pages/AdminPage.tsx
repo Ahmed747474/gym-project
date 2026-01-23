@@ -1,10 +1,11 @@
+import dayjs from 'dayjs';
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import Layout from '../components/Layout';
 import LoadingSpinner from '../components/LoadingSpinner';
 import { useAuth } from '../contexts/AuthContext';
 import type { Day, Exercise, Profile, Program } from '../lib/database.types';
-import { supabase } from '../lib/supabase';
+import { createUserProgramAssignment, supabase } from '../lib/supabase';
 
 type Tab = 'programs' | 'users' | 'assignments';
 
@@ -41,15 +42,36 @@ export default function AdminPage() {
   // Assignment
   const [assignUserId, setAssignUserId] = useState('');
   const [assignProgramId, setAssignProgramId] = useState('');
+  const [startDate, setStartDate] = useState(dayjs().format('YYYY-MM-DD'));
+  const [endDate, setEndDate] = useState(dayjs().add(28, 'day').format('YYYY-MM-DD'));
+  const [programDaysCount, setProgramDaysCount] = useState(4);
+  // Add state to store the days count for the selected program
+  const [selectedProgramDaysCount, setSelectedProgramDaysCount] = useState<number>(4);
 
   useEffect(() => {
     if (!isAdmin) return;
     fetchData();
   }, [isAdmin]);
 
+  // Fetch days count when assignProgramId changes
+  useEffect(() => {
+    const fetchDaysCount = async () => {
+      if (!assignProgramId) {
+        setSelectedProgramDaysCount(4);
+        return;
+      }
+      const { count } = await supabase
+        .from('days')
+        .select('*', { count: 'exact', head: true })
+        .eq('program_id', assignProgramId);
+      setSelectedProgramDaysCount(count || 4);
+      setProgramDaysCount(count || 4);
+    };
+    fetchDaysCount();
+  }, [assignProgramId]);
+
   const fetchData = async () => {
     setLoading(true);
-    
     // Fetch programs
     const { data: programsData } = await supabase
       .from('programs')
@@ -65,25 +87,6 @@ export default function AdminPage() {
     setUsers((usersData as Profile[]) || []);
 
     setLoading(false);
-  };
-
-  // Program CRUD
-  const saveProgram = async () => {
-    if (editingProgram) {
-      await supabase
-        .from('programs')
-        .update({ title: programTitle, description: programDescription } as any)
-        .eq('id', editingProgram.id);
-    } else {
-      await supabase
-        .from('programs')
-        .insert({ title: programTitle, description: programDescription } as any);
-    }
-    setShowProgramForm(false);
-    setEditingProgram(null);
-    setProgramTitle('');
-    setProgramDescription('');
-    fetchData();
   };
 
   const deleteProgram = async (id: string) => {
@@ -135,15 +138,30 @@ export default function AdminPage() {
   };
 
   // Assignment
-  const assignProgram = async () => {
-    if (!assignUserId || !assignProgramId) return;
-    await supabase.from('user_programs').insert({
-      user_id: assignUserId,
-      program_id: assignProgramId,
-    } as any);
-    setAssignUserId('');
-    setAssignProgramId('');
-    alert('Program assigned successfully!');
+  // No-op: assignProgram is not used, logic is inline in the button handler.
+
+  // Program Form Save
+  const saveProgram = async () => {
+    if (!programTitle) return;
+    if (editingProgram) {
+      await supabase
+        .from('programs')
+        .update({
+          title: programTitle,
+          description: programDescription || null,
+        })
+        .eq('id', editingProgram.id);
+    } else {
+      await supabase.from('programs').insert({
+        title: programTitle,
+        description: programDescription || null,
+      });
+    }
+    setShowProgramForm(false);
+    setEditingProgram(null);
+    setProgramTitle('');
+    setProgramDescription('');
+    fetchData();
   };
 
   if (!isAdmin) {
@@ -310,9 +328,56 @@ export default function AdminPage() {
                   ))}
                 </select>
               </div>
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-slate-400 mb-2">Start Date</label>
+                <input
+                  type="date"
+                  value={startDate}
+                  onChange={e => setStartDate(e.target.value)}
+                  className="w-full px-4 py-3 bg-slate-700 border border-slate-600 rounded-lg text-white"
+                />
+              </div>
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-slate-400 mb-2">End Date</label>
+                <input
+                  type="date"
+                  value={endDate}
+                  onChange={e => setEndDate(e.target.value)}
+                  className="w-full px-4 py-3 bg-slate-700 border border-slate-600 rounded-lg text-white"
+                />
+              </div>
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-slate-400 mb-2">Target Repeats (Cycles)</label>
+                <input
+                  type="number"
+                  min={1}
+                  value={programDaysCount}
+                  onChange={e => setProgramDaysCount(Number(e.target.value))}
+                  className="w-full px-4 py-3 bg-slate-700 border border-slate-600 rounded-lg text-white"
+                />
+              </div>
               <button
-                onClick={assignProgram}
-                disabled={!assignUserId || !assignProgramId}
+                onClick={async () => {
+                  if (!assignUserId || !assignProgramId || !startDate || !endDate || !programDaysCount) return;
+                  try {
+                    await createUserProgramAssignment({
+                      userId: assignUserId,
+                      programId: assignProgramId,
+                      startDate,
+                      endDate,
+                      targetCycles: programDaysCount,
+                    });
+                    setAssignUserId('');
+                    setAssignProgramId('');
+                    setStartDate(dayjs().format('YYYY-MM-DD'));
+                    setEndDate(dayjs().add(28, 'day').format('YYYY-MM-DD'));
+                    setProgramDaysCount(4);
+                    alert('Program assigned successfully!');
+                  } catch (err) {
+                    alert('Error assigning program: ' + (err instanceof Error ? err.message : 'Unknown error'));
+                  }
+                }}
+                disabled={!assignUserId || !assignProgramId || !startDate || !endDate || !programDaysCount}
                 className="w-full py-3 bg-blue-500 hover:bg-blue-600 disabled:bg-slate-600 disabled:cursor-not-allowed text-white font-semibold rounded-lg transition-colors"
               >
                 Assign Program

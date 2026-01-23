@@ -177,6 +177,29 @@ export interface Database {
           notes?: string | null
         }
       }
+      assignment_exercise_progress: {
+        Row: {
+          id: string;
+          assignment_day_id: string;
+          exercise_id: string;
+          done: boolean;
+          done_at: string | null;
+        };
+        Insert: {
+          id?: string;
+          assignment_day_id: string;
+          exercise_id: string;
+          done?: boolean;
+          done_at?: string | null;
+        };
+        Update: {
+          id?: string;
+          assignment_day_id?: string;
+          exercise_id?: string;
+          done?: boolean;
+          done_at?: string | null;
+        };
+      };
     }
     Views: {
       [_ in never]: never
@@ -214,6 +237,10 @@ export type ProgramWithDays = Program & {
   days: Day[]
 }
 
+export type AssignmentExerciseProgress = Database['public']['Tables']['assignment_exercise_progress']['Row'];
+export type ExerciseWithAssignmentProgress = Exercise & {
+  progress?: AssignmentExerciseProgress | null;
+};
 export type ExerciseWithProgress = Exercise & {
-  progress?: ExerciseProgress | null
-}
+  progress?: ExerciseProgress | null;
+};

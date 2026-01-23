@@ -1,69 +1,90 @@
 import { useEffect, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import JumpToInput from '../components/JumpToInput';
 import Layout from '../components/Layout';
 import LoadingSpinner from '../components/LoadingSpinner';
 import { useAuth } from '../contexts/AuthContext';
-import type { Day, ExerciseWithProgress } from '../lib/database.types';
+import type { Day, ExerciseWithAssignmentProgress } from '../lib/database.types';
 import { supabase } from '../lib/supabase';
 
 export default function DayExercisesPage() {
   const { programId, dayId } = useParams<{ programId: string; dayId: string }>();
   const navigate = useNavigate();
   const { user } = useAuth();
-  const [day, setDay] = useState<Day | null>(null);
-  const [exercises, setExercises] = useState<ExerciseWithProgress[]>([]);
+  const [assignmentDay, setAssignmentDay] = useState<any | null>(null);
+  const [programDay, setProgramDay] = useState<Day | null>(null);
+  const [exercises, setExercises] = useState<ExerciseWithAssignmentProgress[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
   useEffect(() => {
     const fetchDayExercises = async () => {
-      if (!dayId || !user) return;
-
-      // Fetch day
-      const { data: dayData, error: dayError } = await supabase
-        .from('days')
-        .select('*')
-        .eq('id', dayId)
-        .single();
-
-      if (dayError) {
-        setError('Day not found');
+      console.log('[DayExercisesPage] useEffect triggered', { dayId, user });
+      if (!dayId || !user) {
+        setError('Not authorized or invalid day.');
         setLoading(false);
         return;
       }
 
-      setDay(dayData);
+      // 1. Fetch assignment_day (scheduled day)
+      console.log('[DayExercisesPage] Fetching assignment_day', { dayId });
+      const { data: assignmentDayData, error: assignmentDayError } = await supabase
+        .from('assignment_days')
+        .select('*')
+        .eq('id', dayId)
+        .single();
+      if (assignmentDayError || !assignmentDayData) {
+        setError('Scheduled day not found');
+        setLoading(false);
+        return;
+      }
+      setAssignmentDay(assignmentDayData);
 
-      // Fetch exercises
+      // 2. Fetch program_day (template day)
+      console.log('[DayExercisesPage] Fetching program_day', { program_day_id: assignmentDayData.program_day_id });
+      const { data: programDayData, error: programDayError } = await supabase
+        .from('days')
+        .select('*')
+        .eq('id', assignmentDayData.program_day_id)
+        .single();
+      if (programDayError || !programDayData) {
+        setError('Template day not found');
+        setLoading(false);
+        return;
+      }
+      setProgramDay(programDayData);
+
+      // 3. Fetch exercises for this program_day
+      console.log('[DayExercisesPage] Fetching exercises', { program_day_id: assignmentDayData.program_day_id });
       const { data: exercisesData, error: exercisesError } = await supabase
         .from('exercises')
         .select('*')
-        .eq('day_id', dayId)
+        .eq('day_id', assignmentDayData.program_day_id)
         .order('exercise_number');
-
       if (exercisesError) {
         setError('Failed to load exercises');
         setLoading(false);
         return;
       }
-
-      // Fetch progress
       const exercises = (exercisesData || []) as any[];
       const exerciseIds = exercises.map((e: any) => e.id);
-      const { data: progressData } = await supabase
-        .from('exercise_progress')
-        .select('*')
-        .eq('user_id', user.id)
+
+      // 4. Fetch progress for this assignment_day
+      console.log('[DayExercisesPage] Fetching progress', { assignment_day_id: dayId, exerciseIds });
+      const { data: progressData, error: progressError } = await supabase
+        .from('assignment_exercise_progress')
+        .select('exercise_id, done, done_at')
+        .eq('assignment_day_id', dayId)
         .in('exercise_id', exerciseIds);
-
+      if (progressError) {
+        console.error('Error fetching progress:', progressError);
+      }
+      // Map of exercise_id to progress row
       const progressMap = new Map((progressData as any[] || []).map((p: any) => [p.exercise_id, p]));
-
-      const exercisesWithProgress: ExerciseWithProgress[] = exercises.map((exercise: any) => ({
+      const exercisesWithProgress: ExerciseWithAssignmentProgress[] = exercises.map((exercise: any) => ({
         ...exercise,
         progress: progressMap.get(exercise.id) || null,
       }));
-
       setExercises(exercisesWithProgress);
       setLoading(false);
     };
@@ -72,35 +93,61 @@ export default function DayExercisesPage() {
   }, [dayId, user]);
 
   const toggleExerciseDone = async (exerciseId: string, isDone: boolean) => {
-    if (!user) return;
+    if (!user || !dayId) return;
+    const assignmentDayId = dayId; // If route param is not assignment_day_id, update accordingly
+    const nextDone = !isDone;
+    console.log('Toggling done:', { assignmentDayId, exerciseId, nextDone });
 
-    if (isDone) {
-      // Remove progress
-      await supabase
-        .from('exercise_progress')
-        .delete()
-        .eq('user_id', user.id)
-        .eq('exercise_id', exerciseId);
+    // Upsert progress row
+    const { data, error } = await supabase
+      .from('assignment_exercise_progress')
+      .upsert({
+        assignment_day_id: assignmentDayId,
+        exercise_id: exerciseId,
+        done: nextDone,
+        done_at: nextDone ? new Date().toISOString() : null,
+      }, { onConflict: 'assignment_day_id,exercise_id' })
+      .select()
+      .single();
 
-      setExercises(exercises.map(e => 
-        e.id === exerciseId ? { ...e, progress: null } : e
-      ));
-    } else {
-      // Add progress
-      const { data } = await supabase
-        .from('exercise_progress')
-        .insert({
-          user_id: user.id,
-          exercise_id: exerciseId,
-        } as any)
-        .select()
-        .single();
+    if (error) {
+      console.error('Supabase error (upsert progress):', error);
+    }
 
-      if (data) {
-        setExercises(exercises.map(e => 
-          e.id === exerciseId ? { ...e, progress: data as any } : e
-        ));
+    // Update local state
+    const updatedExercises = exercises.map(e => {
+      if (e.id !== exerciseId) return e;
+      if (nextDone) {
+        // Ensure all required fields are present for progress
+        const prev = e.progress;
+        return {
+          ...e,
+          progress: {
+            id: prev?.id ?? '', // fallback to empty string if not present
+            assignment_day_id: prev?.assignment_day_id ?? dayId,
+            exercise_id: e.id,
+            done: true,
+            done_at: new Date().toISOString(),
+          },
+        };
+      } else {
+        return { ...e, progress: null };
       }
+    });
+    setExercises(updatedExercises);
+
+    // Check if all exercises are now done
+    const allDone = updatedExercises.every(e => e.progress && e.progress.done);
+    // Update assignment_days.status accordingly
+    const { error: dayStatusError } = await supabase
+      .from('assignment_days')
+      .update({
+        status: allDone ? 'done' : 'pending',
+        completed_at: allDone ? new Date().toISOString() : null,
+      })
+      .eq('id', assignmentDayId);
+    if (dayStatusError) {
+      console.error('Supabase error (update assignment_days status):', dayStatusError);
     }
   };
 
@@ -124,7 +171,7 @@ export default function DayExercisesPage() {
     );
   }
 
-  if (error || !day) {
+  if (error || !assignmentDay || !programDay) {
     return (
       <Layout title="Error" showBack>
         <div className="p-4 text-center">
@@ -135,8 +182,25 @@ export default function DayExercisesPage() {
   }
 
   return (
-    <Layout title={`Day ${day.day_number}: ${day.title}`} showBack>
+    <Layout title={`Day ${programDay.day_number}: ${programDay.title}`} showBack>
       <div className="p-4 pb-20">
+        {/* Assignment Day Details */}
+        <div className="bg-slate-900 rounded-xl p-4 mb-4">
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+            <div>
+              <div className="text-slate-400 text-xs">Scheduled Date</div>
+              <div className="text-white font-bold">{assignmentDay.scheduled_date}</div>
+            </div>
+            <div>
+              <div className="text-slate-400 text-xs">Repeat</div>
+              <div className="text-white font-bold">{assignmentDay.repeat_no}</div>
+            </div>
+            <div>
+              <div className="text-slate-400 text-xs">Status</div>
+              <div className="text-white font-bold">{assignmentDay.status}</div>
+            </div>
+          </div>
+        </div>
         {/* Progress summary */}
         <div className="bg-slate-800 rounded-xl p-4 mb-6">
           <div className="flex justify-between items-center mb-2">
@@ -205,9 +269,9 @@ export default function DayExercisesPage() {
                     </button>
 
                     {/* Exercise details */}
-                    <Link
-                      to={`/programs/${programId}/days/${dayId}/exercises/${exercise.id}`}
-                      className="flex-1 p-4 hover:bg-slate-750 transition-colors"
+                    <button
+                      onClick={() => navigate(`/programs/${programId}/days/${dayId}/exercises/${exercise.id}`.replace(`days/${dayId}`, `days/${dayId}`))}
+                      className="flex-1 p-4 hover:bg-slate-750 transition-colors text-left cursor-pointer"
                     >
                       <div className="flex items-center justify-between">
                         <div className="flex-1 min-w-0">
@@ -235,7 +299,7 @@ export default function DayExercisesPage() {
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                         </svg>
                       </div>
-                    </Link>
+                    </button>
                   </div>
                 </div>
               );
