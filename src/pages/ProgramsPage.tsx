@@ -15,11 +15,11 @@ async function processProgramCompletion(assignment_id: string) {
   // Fetch assignment row
   const { data: assignment } = await supabase
     .from('user_program_assignments')
-    .select('max_cycles, target_cycles, state, user_id, queued_at')
+    .select('target_cycles, state, user_id, queued_at')
     .eq('id', assignment_id)
     .maybeSingle();
   if (!assignment) return;
-  const maxCycles = assignment.target_cycles || assignment.max_cycles;
+  const maxCycles = assignment.target_cycles ;
   // Fetch all assignment_days for assignment_id
   const { data: allDays } = await supabase
     .from('assignment_days')
@@ -312,7 +312,7 @@ export default function ProgramsPage() {
             .map((assignment: any) => {
               const progress = progresses[assignment.program_id];
               // --- Compute repeat progress data ---
-              const totalRepeats = assignment.target_cycles || assignment.max_cycles || 1;
+              const totalRepeats = assignment.target_cycles  || 1;
               const programDaysCount = assignment.program_days_count || 1;
               // Find current repeat info
               let currentRepeatNo = progress?.cycle?.currentRepeatNo || 1;
@@ -373,7 +373,7 @@ export default function ProgramsPage() {
             <div className="grid gap-4">
               {queuedAssignments.map((assignment) => {
                 // Compute repeat progress for queued assignment (all gray/disabled)
-                const totalRepeats = assignment.target_cycles || assignment.max_cycles || 1;
+                const totalRepeats = assignment.target_cycles  || 1;
                 const programDaysCount = assignment.program_days_count || 1;
                 // No progress, so all zeros
                 const doneDays = 0;
@@ -420,7 +420,7 @@ export default function ProgramsPage() {
             <div className="text-slate-400">No history assignments</div>
           )}
           {historyAssignments.map((assignment) => {
-            const totalRepeats = assignment.target_cycles || assignment.max_cycles || 1;
+            const totalRepeats = assignment.target_cycles || 1;
             const completedRepeats = assignment.completed_repeats || totalRepeats;
             const isCompleted = (assignment.state === 'completed' || (assignment.state === 'archived' && completedRepeats === totalRepeats));
             const isEnded = assignment.state === 'archived' && completedRepeats < totalRepeats;

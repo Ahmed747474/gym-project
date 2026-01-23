@@ -56,7 +56,7 @@ export async function processQueue(userId: string) {
       .from('assignment_days')
       .select('status,repeat_no')
       .eq('assignment_id', active.id);
-    const maxCycles = active.target_cycles || active.max_cycles || 1;
+    const maxCycles = active.target_cycles || 1;
     let completedRepeats = 0;
     if (days) {
       for (let r = 1; r <= maxCycles; r++) {
@@ -89,7 +89,7 @@ export async function processQueue(userId: string) {
           .eq('assignment_id', nextQueued.id);
 
         if (!existingDays || existingDays.length === 0) {
-          const maxCycles = nextQueued.target_cycles || nextQueued.max_cycles || 1;
+          const maxCycles = nextQueued.target_cycles || 1;
           const programDaysCount = nextQueued.program_days_count || 1;
           const totalDays = maxCycles * programDaysCount;
           const daysToInsert = [];
@@ -395,7 +395,7 @@ export async function assignProgramToUser(userId: string, programId: string, sta
         start_date: startDate,
         end_date: endDate,
         program_days_count: programDaysCount,
-        max_cycles: maxCycles,
+        target_cycles: maxCycles,
         state: 'active',
         activated_at: now,
         queued_at: now,
@@ -433,7 +433,7 @@ export async function assignProgramToUser(userId: string, programId: string, sta
         start_date: startDate,
         end_date: endDate,
         program_days_count: programDaysCount,
-        max_cycles: maxCycles,
+        target_cycles: maxCycles,
         state: 'queued',
         queued_at: now,
       })
