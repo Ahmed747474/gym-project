@@ -18,6 +18,7 @@ async function processProgramCompletion(assignment_id: string) {
     .select('target_cycles, state, user_id, queued_at')
     .eq('id', assignment_id)
     .maybeSingle();
+
   if (!assignment) return;
   const maxCycles = assignment.target_cycles ;
   // Fetch all assignment_days for assignment_id
@@ -25,6 +26,7 @@ async function processProgramCompletion(assignment_id: string) {
     .from('assignment_days')
     .select('repeat_no, status')
     .eq('assignment_id', assignment_id);
+
   // Compute completedRepeats
   let completedRepeats = 0;
   for (let r = 1; r <= maxCycles; r++) {
@@ -216,6 +218,7 @@ export default function ProgramsPage() {
           },
         });
         if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        
         const programsData = await response.json();
         setPrograms(programsData || []);
 

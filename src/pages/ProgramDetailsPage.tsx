@@ -27,6 +27,7 @@ export default function ProgramDetailsPage() {
   const [repeatGroups, setRepeatGroups] = useState<any[]>([]);
   const [completedCycles, setCompletedCycles] = useState(0);
   const [targetCycles, setTargetCycles] = useState(0);
+  const [templateCache, setTemplateCache] = useState<Record<string, { programDay?: any; exercises?: any[] }>>({});
   // progress is not used, remove it
   const [statusMsg, setStatusMsg] = useState<string>('');
 
@@ -49,46 +50,10 @@ export default function ProgramDetailsPage() {
 
       setProgram(programData);
 
-      // Fetch days with exercise counts
-      const { data: daysData, error: daysError } = await supabase
-        .from('days')
-        .select(`
-          *,
-          exercises(id)
-        `)
-        .eq('program_id', programId)
-        .order('day_number');
-
-      if (daysError) {
-        setError('Failed to load days');
-        setLoading(false);
-        return;
-      }
-
-      // Fetch progress for all exercises
-      const { data: progressData } = await supabase
-        .from('exercise_progress')
-        .select('exercise_id')
-        .eq('user_id', user.id);
-
-      const completedExerciseIds = new Set((progressData as any[] || []).map((p: any) => p.exercise_id));
-
-      // Calculate completion for each day
-      const daysWithCompletion: DayWithCompletion[] = ((daysData || []) as any[]).map((day: any) => {
-        const exercises = day.exercises || [];
-        const exerciseCount = exercises.length;
-        const completedCount = exercises.filter((e: any) => completedExerciseIds.has(e.id)).length;
-        const completion = exerciseCount > 0 ? Math.round((completedCount / exerciseCount) * 100) : 0;
-        
-        return {
-          ...day,
-          exerciseCount,
-          completion,
-        };
-      });
-
-      setDays(daysWithCompletion);
-      setLoading(false);
+      // Don't fetch program template days here — we'll derive days from the
+      // generated `assignment_days` for the active assignment below. Only
+      // set the program metadata.
+      // (Loading state will be resolved after assignment/day processing.)
     };
 
     const fetchAssignmentAndDays = async () => {
@@ -99,12 +64,16 @@ export default function ProgramDetailsPage() {
         .select('*')
         .eq('user_id', user.id)
         .eq('program_id', programId)
-        .eq('status', 'active')
+        .eq('state', 'active')
         .order('start_date', { ascending: false })
         .limit(1)
         .maybeSingle();
       setAssignment(assignmentData);
-      if (!assignmentData) return;
+      if (!assignmentData) {
+        setLoading(false);
+        setStatusMsg('No active assignment for this program.');
+        return;
+      }
       setTargetCycles(assignmentData.target_cycles || 0);
 
       // Fetch all assignment_days for this assignment, ordered by scheduled_date
@@ -120,15 +89,20 @@ export default function ProgramDetailsPage() {
         return;
       }
 
-      // Fetch all program days for this program in one query
-      const { data: allProgramDays } = await supabase
-        .from('days')
-        .select('*')
-        .eq('program_id', programId);
+      // Determine template program_day_ids referenced by the generated assignment_days
+      const programDayIds = Array.from(new Set((assignmentDays || []).map((ad: any) => ad.program_day_id).filter(Boolean)));
+      // Fetch template days referenced by the assignment days
+      let allProgramDays: any[] = [];
+      if (programDayIds.length > 0) {
+        const { data: pd } = await supabase
+          .from('days')
+          .select('*')
+          .in('id', programDayIds);
+        allProgramDays = pd || [];
+      }
       const programDayMap = new Map((allProgramDays || []).map((d: any) => [d.id, d]));
 
-      // Fetch all exercises for this program in one query
-      const programDayIds = (allProgramDays || []).map((d: any) => d.id);
+      // Fetch all exercises for the referenced program days
       let allExercises: any[] = [];
       if (programDayIds.length > 0) {
         const { data: exs } = await supabase
@@ -157,6 +131,14 @@ export default function ProgramDetailsPage() {
       const progressMap = new Map(
         (allProgress || []).map((p: any) => [`${p.assignment_day_id}_${p.exercise_id}`, p])
       );
+
+      // Build `days` (template days list) for JumpToInput based on template days referenced
+      const daysWithInfo: DayWithCompletion[] = (allProgramDays || []).map((d: any) => {
+        const exercises = (allExercises || []).filter((ex: any) => ex.day_id === d.id) || [];
+        const exerciseCount = exercises.length;
+        return { ...d, exerciseCount, completion: 0 } as DayWithCompletion;
+      });
+      setDays(daysWithInfo);
 
       // Group assignment_days by repeat_no
       const repeatMap = new Map();
@@ -195,15 +177,30 @@ export default function ProgramDetailsPage() {
             exercises: exercisesWithProgress,
           };
         });
-        // Only include days with exercises
-        const filtered = group.filter((g: { exercises: any[] }) => g.exercises.length > 0);
+        // Do not filter out days here — include all scheduled days so exercises
+        // or the lack thereof are visible for debugging and UX.
+        const filtered = group; // keep empty exercises arrays for visibility
         repeatGroupsArr.push({ repeat_no: i, days: filtered });
       }
+      console.log('ProgramDetails: repeatGroupsArr=', repeatGroupsArr);
       setRepeatGroups(repeatGroupsArr);
+      setLoading(false);
     };
     fetchProgramDetails();
     fetchAssignmentAndDays();
   }, [programId, user]);
+
+  async function loadTemplateForAssignmentDay(assignmentDayId: string, programDayId: string) {
+    if (!programDayId) return;
+    try {
+      const { data: pd } = await supabase.from('days').select('*').eq('id', programDayId).maybeSingle();
+      const { data: exs } = await supabase.from('exercises').select('*').eq('day_id', programDayId);
+      setTemplateCache(prev => ({ ...prev, [assignmentDayId]: { programDay: pd || null, exercises: exs || [] } }));
+      console.log('Loaded template for', assignmentDayId, pd, exs);
+    } catch (e) {
+      console.error('Error loading template for', programDayId, e);
+    }
+  }
 
   const handleJumpToDay = (dayNumber: number) => {
     const day = days.find(d => d.day_number === dayNumber);
@@ -281,43 +278,66 @@ export default function ProgramDetailsPage() {
                   <div className="flex-1 border-t border-slate-700" />
                 </div>
                 <div className="grid gap-3">
-                  {group.days.map(({ assignment_day, program_day, exercises }: { assignment_day: any, program_day: any, exercises: any[] }) => (
-                    <div
-                      key={assignment_day.id}
-                      className="block bg-slate-800 rounded-xl p-4 mb-2 animate-slideUp cursor-pointer hover:bg-slate-700 transition-colors"
-                      onClick={() => navigate(`/programs/${programId}/days/${assignment_day.id}`)}
-                    >
-                      <div className="flex items-center justify-between mb-2">
-                        <div className="flex items-center gap-3">
-                          <div className="w-10 h-10 bg-blue-500/20 text-blue-400 rounded-lg flex items-center justify-center font-bold">
-                            {program_day ? program_day.day_number : '?'}
-                          </div>
-                          <div>
-                            <h3 className="font-semibold text-white">{program_day ? program_day.title : 'Day'}</h3>
-                            <p className="text-sm text-slate-500">{assignment_day.scheduled_date}</p>
+                  {group.days.map((dayItem: { assignment_day: any, program_day: any, exercises: any[] }) => {
+                    const { assignment_day, program_day, exercises } = dayItem;
+                    const cached = templateCache[assignment_day.id] || {};
+                    const displayProgramDay = program_day || cached.programDay || null;
+                    const displayExercises = (cached.exercises && cached.exercises.length > 0) ? cached.exercises : (exercises || []);
+                    return (
+                      <div
+                        key={assignment_day.id}
+                        className="block bg-slate-800 rounded-xl p-4 mb-2 animate-slideUp cursor-pointer hover:bg-slate-700 transition-colors"
+                        onClick={() => navigate(`/programs/${programId}/days/${assignment_day.id}`)}
+                      >
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center gap-3">
+                            <div className="w-10 h-10 bg-blue-500/20 text-blue-400 rounded-lg flex items-center justify-center font-bold">
+                              {displayProgramDay ? displayProgramDay.day_number : '?'}
+                            </div>
+                            <div>
+                              <h3 className="font-semibold text-white">{displayProgramDay ? displayProgramDay.title : 'Day'}</h3>
+                              <p className="text-sm text-slate-500">{assignment_day.scheduled_date}</p>
+                            </div>
                           </div>
                         </div>
-                      </div>
-                      {/* Exercises list with checkboxes and details link */}
-                      <div className="mt-3 space-y-2">
-                        {exercises.map((ex: any) => (
-                          <div key={ex.id} className="flex items-center gap-3"
-                            onClick={e => { e.stopPropagation(); navigate(`/programs/${programId}/days/${assignment_day.id}/exercises/${ex.id}`); }}
-                            style={{ cursor: 'pointer' }}
-                          >
-                            <input
-                              type="checkbox"
-                              checked={!!ex.progress && ex.progress.done}
-                              readOnly
-                              className="form-checkbox h-5 w-5 text-green-500 bg-slate-700 border-slate-600 rounded"
-                            />
-                            <span className="text-white">{ex.name}</span>
-                            <span className="text-slate-500 text-xs ml-2">{ex.sets}×{ex.reps}</span>
+
+                        {!displayProgramDay && (
+                          <div className="text-xs text-yellow-300 mb-2">program_day_id: {String(assignment_day.program_day_id)}</div>
+                        )}
+                        {!displayProgramDay && !cached.programDay && (
+                          <div className="mb-2">
+                            <button
+                              className="px-2 py-1 text-xs bg-blue-600 rounded text-white"
+                              onClick={e => { e.stopPropagation(); loadTemplateForAssignmentDay(assignment_day.id, assignment_day.program_day_id); }}
+                            >
+                              Load template
+                            </button>
                           </div>
-                        ))}
+                        )}
+
+                        <div className="mt-3 space-y-2">
+                          {displayExercises.length === 0 && (
+                            <div className="text-slate-500 text-sm">No exercises found for this day.</div>
+                          )}
+                          {displayExercises.map((ex: any) => (
+                            <div key={ex.id} className="flex items-center gap-3"
+                              onClick={e => { e.stopPropagation(); navigate(`/programs/${programId}/days/${assignment_day.id}/exercises/${ex.id}`); }}
+                              style={{ cursor: 'pointer' }}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={!!ex.progress && ex.progress.done}
+                                readOnly
+                                className="form-checkbox h-5 w-5 text-green-500 bg-slate-700 border-slate-600 rounded"
+                              />
+                              <span className="text-white">{ex.name}</span>
+                              <span className="text-slate-500 text-xs ml-2">{ex.sets}×{ex.reps}</span>
+                            </div>
+                          ))}
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             ))}
