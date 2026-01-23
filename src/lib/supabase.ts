@@ -186,7 +186,7 @@ export async function createUserProgramAssignment({
           scheduled_date: scheduledDate,
           repeat_no,
           program_day_id: programDay.id,
-            state: 'pending',
+            status: 'pending',
         });
       }
       const { error: daysError } = await supabase.from('assignment_days').insert(days);
@@ -223,7 +223,7 @@ export async function createUserProgramAssignment({
         scheduled_date: scheduledDate,
         repeat_no,
         program_day_id: programDay.id,
-          state: 'pending',
+          status: 'pending',
       });
     }
     const { error: daysError } = await supabase.from('assignment_days').insert(days);
@@ -415,7 +415,7 @@ export async function assignProgramToUser(userId: string, programId: string, sta
         scheduled_date: scheduledDate,
         repeat_no,
         day_index,
-        state: 'pending',
+        status: 'pending',
       });
     }
     const { error: daysError } = await supabase.from('assignment_days').insert(days);
