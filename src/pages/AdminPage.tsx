@@ -1,5 +1,5 @@
 import dayjs from 'dayjs';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import Layout from '../components/Layout';
 import LoadingSpinner from '../components/LoadingSpinner';
@@ -21,6 +21,15 @@ export default function AdminPage() {
   const [editingProgram, setEditingProgram] = useState<Program | null>(null);
   const [programTitle, setProgramTitle] = useState('');
   const [programDescription, setProgramDescription] = useState('');
+  const [savingProgram, setSavingProgram] = useState(false);
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const toastTimer = useRef<number | null>(null);
+
+  const showToast = (message: string, type: 'success' | 'error' = 'success') => {
+    setToast({ message, type });
+    if (toastTimer.current) window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(null), 3000) as unknown as number;
+  };
 
   // Day form
   const [showDayForm, setShowDayForm] = useState(false);
@@ -38,6 +47,17 @@ export default function AdminPage() {
   const [exerciseRest, setExerciseRest] = useState('60');
   const [exerciseNotes, setExerciseNotes] = useState('');
   const [exerciseVideoUrl, setExerciseVideoUrl] = useState('');
+  // Import from PDF modal state (AdminPage)
+  const [importModal, setImportModal] = useState<{
+    open: boolean;
+    step: number;
+    file?: File | null;
+    fileB64?: string | null;
+    loading?: boolean;
+    error?: string | null;
+    parsed?: any;
+    edited?: any;
+  } | null>(null);
   const [assignments, setAssignments] = useState<any[]>([]);
   const [programMap, setProgramMap] = useState<Record<string, Program>>({});
   const [showQueued, setShowQueued] = useState(false);
@@ -333,25 +353,241 @@ useEffect(() => {
   // Program Form Save
   const saveProgram = async () => {
     if (!programTitle) return;
-    if (editingProgram) {
-      await supabase
-        .from('programs')
-        .update({
+    setSavingProgram(true);
+    try {
+      if (editingProgram) {
+        await supabase
+          .from('programs')
+          .update({
+            title: programTitle,
+            description: programDescription || null,
+          })
+          .eq('id', editingProgram.id);
+      } else {
+        await supabase.from('programs').insert({
           title: programTitle,
           description: programDescription || null,
-        })
-        .eq('id', editingProgram.id);
-    } else {
-      await supabase.from('programs').insert({
-        title: programTitle,
-        description: programDescription || null,
-      });
+        });
+      }
+      setShowProgramForm(false);
+      setEditingProgram(null);
+      setProgramTitle('');
+      setProgramDescription('');
+      fetchData();
+    } finally {
+      setSavingProgram(false);
     }
-    setShowProgramForm(false);
-    setEditingProgram(null);
-    setProgramTitle('');
-    setProgramDescription('');
-    fetchData();
+  };
+
+  // -------- Import from PDF flow --------
+  const onImportFileChange = async (f?: File | null) => {
+    if (!f) return setImportModal({ ...(importModal || {}), file: null, fileB64: null, open: importModal?.open ?? true, step: importModal?.step ?? 1 });
+    const reader = new FileReader();
+    reader.onload = () => {
+      const arr = reader.result as ArrayBuffer;
+      const bytes = new Uint8Array(arr);
+      let binary = '';
+      for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+      const b64 = btoa(binary);
+      setImportModal({ 
+        ...(importModal || {}), 
+        file: f, 
+        fileB64: b64, 
+        open: importModal?.open ?? true, 
+        step: importModal?.step ?? 1 
+      });
+    };
+    reader.readAsArrayBuffer(f);
+  };
+
+  const parsePdfWithAI = async () => {
+    if (!importModal?.fileB64) return setImportModal({ ...(importModal || {}), error: 'No file selected', open: importModal?.open ?? true, step: importModal?.step ?? 1 });
+    setImportModal({ ...(importModal || {}), loading: true, error: null });
+    try {
+      // Try to include the user's access token so the Edge Function accepts the request
+      let token: string | null = null;
+      try {
+        const sess = await supabase.auth.getSession();
+        token = (sess as any)?.data?.session?.access_token ?? null;
+      } catch (e) {
+        try {
+          // fallback for older clients
+          // @ts-ignore
+          token = (supabase.auth.session?.() as any)?.access_token ?? null;
+        } catch (e2) {
+          token = null;
+        }
+      }
+
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      const res = await supabase.functions.invoke('gemini-endpoint', {
+        method: 'POST',
+        headers,
+        body: {
+          text: importModal.fileB64,
+          filename: importModal.file?.name || 'upload.pdf',
+        },
+      });
+
+      // supabase.functions.invoke may return a Fetch Response or an object with data/error
+      let text = '';
+      if (res && typeof (res as any).text === 'function') {
+        text = await (res as any).text();
+      } else if ((res as any).data) {
+        text = JSON.stringify((res as any).data);
+      } else if ((res as any).error) {
+        throw new Error((res as any).error.message || 'Function error');
+      } else {
+        text = String(res);
+      }
+
+      // If the Supabase functions gateway strips/rewrites auth and returns a 401/Invalid JWT,
+      // attempt a direct fetch fallback to the deployed function URL with the same headers.
+      try {
+        const status = (res as any)?.status;
+        if (status === 401 || /invalid jwt/i.test(text)) {
+          const functionUrl = `${import.meta.env.VITE_SUPABASE_URL || 'https://nniavjhivwnrgimotrit.supabase.co'}/functions/v1/gemini-endpoint`;
+          const fetchRes = await fetch(functionUrl, {
+            method: 'POST',
+            headers: { ...headers },
+            body: JSON.stringify({ file_b64: importModal.fileB64, filename: importModal.file?.name || 'upload.pdf' }),
+          });
+          // prefer the fetch response body if available
+          const fetchedText = await fetchRes.text();
+          if (fetchedText) {
+            console.warn('Used direct fetch fallback for gemini-endpoint');
+            text = fetchedText;
+          }
+        }
+        // If still a gateway error (502) or Bad Gateway text, try alternate deployed function name
+        if ((res as any)?.status === 502 || /bad gateway/i.test(text)) {
+          try {
+            const altUrl = `${import.meta.env.VITE_SUPABASE_URL || 'https://nniavjhivwnrgimotrit.supabase.co'}/functions/v1/parse-program-pdf`;
+            const altRes = await fetch(altUrl, {
+              method: 'POST',
+              headers: { ...headers },
+              body: JSON.stringify({ file_b64: importModal.fileB64, filename: importModal.file?.name || 'upload.pdf' }),
+            });
+            const altText = await altRes.text();
+            if (altText) {
+              console.warn('Used alternate function URL parse-program-pdf fallback');
+              text = altText;
+            }
+          } catch (altErr) {
+            console.warn('Alternate function fetch failed', altErr);
+          }
+        }
+      } catch (fbErr) {
+        console.warn('Direct fetch fallback failed', fbErr);
+      }
+
+       let json: any;
+      try { json = JSON.parse(text); } catch (err) { throw new Error('Invalid JSON from parser'); }
+      if (json.error) throw new Error(json.error);
+      if (!json.parsed || !json.parsed.days || json.parsed.days.length === 0) {
+        setImportModal({ ...(importModal || {}), loading: false, error: 'Parser returned no days' });
+        return;
+      }
+      // Keep parsed and an editable copy
+      setImportModal({ ...(importModal || {}), loading: false, parsed: json.parsed, edited: JSON.parse(JSON.stringify(json.parsed)), step: 2 });
+      try { showToast('Parsed successfully', 'success'); } catch (e) {}
+    } catch (err: any) {
+      console.error('Parse error', err);
+      setImportModal({ ...(importModal || {}), loading: false, error: err.message || 'Parse failed' });
+      try { showToast(err.message || 'Parse failed', 'error'); } catch (e) {}
+    }
+  };
+
+
+// const parsePdfWithAI = async () => {
+//   const { data: s } = await supabase.auth.getSession();
+//   const token = s.session?.access_token;
+//   if (!token) throw new Error("No session");
+// // normalize base64
+// let fileB64 = importModal?.fileB64?.trim();
+
+// // remove data-url prefix if exists
+// if (fileB64?.includes("base64,")) fileB64 = fileB64?.split("base64,")[1];
+
+// // remove any whitespace/newlines
+// fileB64 = fileB64?.replace(/\s+/g, "");
+
+// // convert base64url -> base64
+// fileB64 = fileB64?.replace(/-/g, "+").replace(/_/g, "/");
+
+// // pad '=' if missing
+// const pad = fileB64?.length?fileB64?.length % 4 : '';
+// if (pad) fileB64 += "=".repeat(4 - pad);
+
+//   const res = await fetch(
+//     "https://nniavjhivwnrgimotrit.supabase.co/functions/v1/gemini-endpoint",
+//     {
+//       method: "POST",
+//       headers: {
+//         "Content-Type": "application/json",
+//         Authorization: `Bearer ${token}`,
+//       },
+//       body: JSON.stringify({
+//          text: fileB64,
+//         filename: importModal?.file?.name || "upload.pdf",
+//       }),
+//     }
+//   );
+
+//   const text = await res.text();
+//   console.log("STATUS:", res.status);
+//   console.log("BODY:", text);
+
+//   if (!res.ok) throw new Error(`Function ${res.status}: ${text}`);
+// };
+ 
+
+const saveParsedToDb = async () => {
+    if (!importModal?.edited) return;
+    setImportModal({ ...(importModal || {}), loading: true, error: null });
+    try {
+      const prog = importModal.edited.program || { title: 'Imported program', description: null };
+      const { data: programData, error: programError } = await supabase.from('programs').insert({ title: prog.title, description: prog.description || null }).select('id').single();
+      if (programError) throw programError;
+      const programId = programData.id;
+      // insert days
+      for (const d of importModal.edited.days || []) {
+        const { data: dayData, error: dayError } = await supabase.from('days').insert({ program_id: programId, day_number: d.day_number || 0, title: d.title || null, description: d.description || null }).select('id').single();
+        if (dayError) throw dayError;
+        const dayId = dayData.id;
+        // insert exercises
+        let idx = 1;
+        for (const ex of d.exercises || []) {
+          const exData = {
+            day_id: dayId,
+            exercise_number: ex.exercise_number || idx++,
+            name: ex.name || 'Unnamed',
+            sets: ex.sets || null,
+            reps: ex.reps || null,
+            rest_seconds: ex.rest_seconds || null,
+            notes: ex.notes || null,
+            video_url: ex.video_url || null,
+          };
+          const { error: exError } = await supabase.from('exercises').insert(exData);
+          if (exError) throw exError;
+        }
+      }
+      setImportModal(null);
+      showToast('Import successful', 'success');
+      fetchData();
+      // navigate to admin program details page after short delay so toast is visible
+      setTimeout(() => {
+        const base = (import.meta.env.BASE_URL || '/').replace(/\/$/, '');
+        const target = `${base}/admin/programs/${programId}/days`;
+        window.location.href = target;
+      }, 700);
+    } catch (err: any) {
+      console.error('Save parsed error', err);
+      setImportModal({ ...(importModal || {}), loading: false, error: err.message || 'Save failed' });
+      try { showToast(err.message || 'Save failed', 'error'); } catch (e) {}
+    }
   };
 
   if (!isAdmin) {
@@ -377,6 +613,9 @@ useEffect(() => {
 
   return (
     <Layout title="Admin Panel">
+        {toast && (
+          <div className={`fixed top-6 right-6 z-50 p-3 rounded shadow-lg ${toast.type === 'success' ? 'bg-green-600' : 'bg-red-600'} text-white`}>{toast.message}</div>
+        )}
         <Link to="/programs" className="text-blue-400 mt-4 inline-block">
             Back to Programs
           </Link>
@@ -403,12 +642,15 @@ useEffect(() => {
           <div>
             <div className="flex justify-between items-center mb-4">
               <h2 className="text-xl font-bold text-white">Programs</h2>
+              <div className="flex gap-2">
               <button
                 onClick={() => setShowProgramForm(true)}
                 className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors"
               >
                 + New Program
               </button>
+              <button onClick={() => setImportModal({ open: true, step: 1, file: null, loading: false })} className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors">Import from PDF</button>
+              </div>
             </div>
 
             {programs.map((program) => (
@@ -667,10 +909,17 @@ useEffect(() => {
               </button>
               <button
                 onClick={saveProgram}
-                disabled={!programTitle}
+                disabled={!programTitle || savingProgram}
                 className="flex-1 py-3 bg-blue-500 hover:bg-blue-600 disabled:bg-slate-600 text-white font-semibold rounded-lg transition-colors"
               >
-                Save
+                {savingProgram ? (
+                  <div className="flex items-center justify-center">
+                    <div className="w-4 h-4 border-2 border-slate-700 border-t-blue-500 rounded-full animate-spin mr-2" />
+                    Saving...
+                  </div>
+                ) : (
+                  'Save'
+                )}
               </button>
             </div>
           </div>
@@ -850,6 +1099,92 @@ useEffect(() => {
           </div>
         </div>
       )}
+      {/* Import from PDF Modal */}
+      {importModal?.open && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-slate-900 w-full max-w-3xl max-h-screen overflow-y-auto rounded-lg p-6 relative">
+            <button onClick={() => setImportModal(null)} className="absolute top-4 right-4 text-slate-400 hover:text-white">Close ×</button>
+            <h3 className="text-xl font-bold text-white mb-4">Import Program from PDF (AI)</h3>
+
+            {importModal.step === 1 && (
+              <div>
+                <p className="text-slate-300 mb-3">Upload a PDF containing the program. The AI will parse program, days and exercises.</p>
+                <input type="file" accept="application/pdf" onChange={e => onImportFileChange(e.target.files?.[0] || undefined)} />
+                <div className="flex gap-3 mt-4">
+                  <button disabled={!importModal?.file || importModal.loading} onClick={parsePdfWithAI} className="px-4 py-2 bg-blue-500 text-white rounded flex items-center gap-2">
+                    {importModal?.loading ? (
+                      <>
+                        <div className="w-4 h-4 border-2 border-slate-700 border-t-blue-500 rounded-full animate-spin" />
+                        Parsing...
+                      </>
+                    ) : (
+                      'Parse with AI'
+                    )}
+                  </button>
+                  <button onClick={() => setImportModal(null)} className="px-4 py-2 bg-slate-700 text-white rounded">Cancel</button>
+                </div>
+                {importModal.error && <p className="text-red-400 mt-3">{importModal.error}</p>}
+              </div>
+            )}
+
+            {importModal.step === 2 && importModal.parsed && (
+              <div className="space-y-4">
+                <div className="bg-slate-800 rounded p-4">
+                  <label className="block text-sm text-slate-300">Program Title</label>
+                  <input className="w-full bg-slate-700 p-2 rounded text-white" value={importModal.edited.program.title || ''} onChange={e => setImportModal({ ...(importModal||{}), edited: { ...importModal.edited, program: { ...importModal.edited.program, title: e.target.value } } })} />
+                  <label className="block text-sm text-slate-300 mt-2">Program Description</label>
+                  <textarea className="w-full bg-slate-700 p-2 rounded text-white" value={importModal.edited.program.description || ''} onChange={e => setImportModal({ ...(importModal||{}), edited: { ...importModal.edited, program: { ...importModal.edited.program, description: e.target.value } } })} />
+                </div>
+
+                {(importModal.edited.days || []).map((d: any, di: number) => (
+                  <div key={di} className="bg-slate-800 rounded p-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <div>
+                        <label className="text-sm text-slate-300">Day #{d.day_number}</label>
+                        <input className="ml-2 bg-slate-700 p-1 rounded text-white" value={d.title || ''} onChange={e => { const days = [...importModal.edited.days]; days[di].title = e.target.value; setImportModal({ ...(importModal||{}), edited: { ...importModal.edited, days } }); }} />
+                      </div>
+                      <div className="flex gap-2">
+                        <button onClick={() => { const days = [...importModal.edited.days]; days.splice(di,1); setImportModal({ ...(importModal||{}), edited: { ...importModal.edited, days } }); }} className="px-3 py-1 bg-red-600 text-white rounded">Remove Day</button>
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      {(d.exercises || []).map((ex: any, ei: number) => (
+                        <div key={ei} className="grid grid-cols-6 gap-2 items-center">
+                          <input className="col-span-1 bg-slate-700 p-1 rounded text-white" value={ex.exercise_number || ''} onChange={e=> { const days = [...importModal.edited.days]; days[di].exercises[ei].exercise_number = Number(e.target.value); setImportModal({ ...(importModal||{}), edited: { ...importModal.edited, days } }); }} />
+                          <input className="col-span-2 bg-slate-700 p-1 rounded text-white" value={ex.name || ''} onChange={e=> { const days = [...importModal.edited.days]; days[di].exercises[ei].name = e.target.value; setImportModal({ ...(importModal||{}), edited: { ...importModal.edited, days } }); }} />
+                          <input className="col-span-1 bg-slate-700 p-1 rounded text-white" value={ex.sets || ''} onChange={e=> { const days = [...importModal.edited.days]; days[di].exercises[ei].sets = e.target.value ? Number(e.target.value) : null; setImportModal({ ...(importModal||{}), edited: { ...importModal.edited, days } }); }} />
+                          <input className="col-span-1 bg-slate-700 p-1 rounded text-white" value={ex.reps || ''} onChange={e=> { const days = [...importModal.edited.days]; days[di].exercises[ei].reps = e.target.value || null; setImportModal({ ...(importModal||{}), edited: { ...importModal.edited, days } }); }} />
+                          <div className="col-span-1 flex gap-2">
+                            <button onClick={() => { const days = [...importModal.edited.days]; days[di].exercises.splice(ei,1); setImportModal({ ...(importModal||{}), edited: { ...importModal.edited, days } }); }} className="px-2 py-1 bg-red-600 text-white rounded">×</button>
+                          </div>
+                        </div>
+                      ))}
+                      <div>
+                        <button onClick={() => { const days = [...importModal.edited.days]; days[di].exercises.push({ exercise_number: (days[di].exercises.length||0)+1, name: '', sets: null, reps: null, rest_seconds: null, notes: null, video_url: null }); setImportModal({ ...(importModal||{}), edited: { ...importModal.edited, days } }); }} className="px-3 py-1 bg-blue-600 text-white rounded">+ Add Exercise</button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+
+                <div className="flex gap-3">
+                  <button onClick={saveParsedToDb} disabled={importModal?.loading} className="px-4 py-2 bg-green-600 text-white rounded flex items-center gap-2">
+                    {importModal?.loading ? (
+                      <>
+                        <div className="w-4 h-4 border-2 border-slate-700 border-t-white rounded-full animate-spin" />
+                        Importing...
+                      </>
+                    ) : (
+                      'Confirm Import'
+                    )}
+                  </button>
+                  <button onClick={() => setImportModal({ ...(importModal||{}), step: 1 })} className="px-4 py-2 bg-slate-700 text-white rounded">Back</button>
+                </div>
+                {importModal.error && <p className="text-red-400 mt-3">{importModal.error}</p>}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {detailsModal?.open && (
         <div className="fixed inset-0 bg-black/60 flex justify-end z-50">
@@ -1005,6 +1340,7 @@ export function AdminDaysPage() {
   const [exerciseRest, setExerciseRest] = useState('60');
   const [exerciseNotes, setExerciseNotes] = useState('');
   const [exerciseVideoUrl, setExerciseVideoUrl] = useState('');
+  
 
   useEffect(() => {
     if (!isAdmin || !programId) return;
