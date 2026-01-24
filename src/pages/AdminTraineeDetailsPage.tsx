@@ -195,11 +195,11 @@ function renderLogDescription(log: any) {
         return `Login detected via ${log.meta?.user_agent || 'unknown device'}`;
     }
     if (log.action === 'EXERCISE_COMPLETED') {
-        const { exercise_name, day_title, day_number, program_title } = log.meta || {};
+        const { exercise_name, day_title, day_number } = log.meta || {};
         return `Completed exercise "${exercise_name}" in Day ${day_number}: ${day_title}`;
     }
     if (log.action === 'EXERCISE_UNCOMPLETED') {
-        const { exercise_name, day_title, day_number } = log.meta || {};
+        const { exercise_name, day_number } = log.meta || {};
         return `Unmarked exercise "${exercise_name}" in Day ${day_number}`;
     }
     if (log.action === 'DAY_COMPLETED') {
