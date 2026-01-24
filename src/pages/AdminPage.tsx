@@ -1,17 +1,18 @@
 import dayjs from 'dayjs';
 import { useEffect, useRef, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useLocation, useParams } from 'react-router-dom';
 import Layout from '../components/Layout';
 import LoadingSpinner from '../components/LoadingSpinner';
 import { useAuth } from '../contexts/AuthContext';
 import type { Day, Exercise, Profile, Program } from '../lib/database.types';
 import { createUserProgramAssignment, supabase } from '../lib/supabase';
 
-type Tab = 'programs' | 'users' | 'assignments' | 'manage-assignments';
+type Tab = 'programs' | 'users' | 'assignments' | 'manage-assignments' | 'coaches';
 
 export default function AdminPage() {
-  const { isAdmin } = useAuth();
-  const [activeTab, setActiveTab] = useState<Tab>('programs');
+  const { isAdmin, profile } = useAuth();
+  const location = useLocation();
+  const [activeTab, setActiveTab] = useState<Tab>((location.state as any)?.tab || 'programs');
   const [programs, setPrograms] = useState<Program[]>([]);
   const [users, setUsers] = useState<Profile[]>([]);
   const [loading, setLoading] = useState(true);
@@ -77,45 +78,71 @@ export default function AdminPage() {
   
 
   // Assignment
-  const [assignUserId, setAssignUserId] = useState('');
+  const [assignUserId, setAssignUserId] = useState((location.state as any)?.userId || '');
   const [assignProgramId, setAssignProgramId] = useState('');
   const [startDate, setStartDate] = useState(dayjs().format('YYYY-MM-DD'));
   const [endDate, setEndDate] = useState(dayjs().add(28, 'day').format('YYYY-MM-DD'));
   const [programDaysCount, setProgramDaysCount] = useState(4);
   // (Removed unused selectedProgramDaysCount state)
+  
+  // -- Coaches Tab Logic --
+  const [coaches, setCoaches] = useState<any[]>([]);
 
-  useEffect(() => {
-    if (!isAdmin) return;
-    fetchData();
-  }, [isAdmin]);
-useEffect(() => {
-    if (!isAdmin) return;
-    const fetchUsers = async () => {
-      const { data: usersData } = await supabase
-        .from('profiles')
-        .select('*');
-      setUsers((usersData as Profile[]) || []);
-    };
-    fetchUsers();
-    fetchAssignments();
-  }, [isAdmin, showQueued]);
-  // Fetch days count when assignProgramId changes
-  useEffect(() => {
+  // Fetch coaches
+  const fetchCoaches = async () => {
+    const { data } = await supabase
+      .from('profiles')
+      .select('*, trainees:profiles!coach_id(count)')
+      .eq('role', 'coach')
+      .order('full_name');
     
-    const fetchDaysCount = async () => {
-      if (!assignProgramId) {
-        setProgramDaysCount(4);
-        return;
-      }
-      const { count } = await supabase
-        .from('days')
-        .select('*', { count: 'exact', head: true })
-        .eq('program_id', assignProgramId);
-      setProgramDaysCount(count || 4);
-    };
-    fetchDaysCount();
-  }, [assignProgramId]);
+    // Map count
+    const mapped = (data || []).map((c: any) => ({
+        ...c,
+        trainee_count: c.trainees ? c.trainees[0]?.count : 0
+    }));
+    setCoaches(mapped);
+  };
+  
+  // Toggle Coach Status
+  const toggleCoachStatus = async (coach: Profile) => {
+      const newStatus = coach.coach_status === 'active' ? 'deactivated' : 'active';
+      const action = newStatus === 'active' ? 'ACTIVATE_COACH' : 'DEACTIVATE_COACH';
+      
+      if (!confirm(`Are you sure you want to ${newStatus === 'deactivated' ? 'deactivate' : 'activate'} this coach?`)) return;
 
+      const { error } = await supabase
+        .from('profiles')
+        .update({ coach_status: newStatus })
+        .eq('id', coach.id);
+        
+      if (error) {
+          alert('Error updating status');
+          console.error(error);
+          return;
+      }
+      
+      // Log it (fire and forget)
+      supabase.from('coach_audit_logs').insert({
+          coach_id: coach.id,
+          actor_id: profile?.id, // Admin
+          action_type: action,
+          meta: { previous_status: coach.coach_status }
+      });
+      
+      fetchCoaches();
+  };
+
+  useEffect(() => {
+    if (activeTab === 'coaches') {
+        fetchCoaches();
+    }
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (!isAdmin && profile?.role !== 'coach') return;
+    // We do fetching in the other effect
+  }, [isAdmin, profile]);
 
   // Hard delete assignment
   const hardDeleteAssignment = async (assignmentId: string) => {
@@ -145,6 +172,7 @@ useEffect(() => {
     setRemoveModal(null);
     fetchAssignments();
   };
+  
   // Soft delete assignment
   const softDeleteAssignment = async (assignmentId: string) => {
     await supabase
@@ -163,21 +191,70 @@ useEffect(() => {
       .eq('id', assignmentId);
     fetchAssignments();
   };
+
   const fetchAssignments = async () => {
     // Fetch assignments (active or queued)
-    const { data: assignmentsData } = await supabase
+    // Join profiles (user_id) and programs (program_id)
+    // Note: using 'profiles' and 'programs' as table names for clarity, ensure FKs match
+    const { data: assignmentsData, error } = await supabase
       .from('user_program_assignments')
-      .select('*')
-      .in('state', showQueued ? ['active', 'queued'] : ['active','archived']);
-    setAssignments(assignmentsData || []);
-    // Fetch programs
-    const { data: programsData } = await supabase
+      .select(`
+        *,
+        profiles:user_id (email, full_name, role),
+        programs:program_id (title)
+      `)
+      .in('state', showQueued ? ['active', 'queued'] : ['active', 'archived'])
+      .order('created_at', { ascending: false });
+    
+    if (error) {
+        console.error('Error fetching assignments:', error);
+    }
+
+    // Map joined data to flat structure for table
+    const flattened = (assignmentsData || []).map((a: any) => ({
+      ...a,
+      user_email: a.profiles?.email,
+      program_title: a.programs?.title
+    }));
+    
+    setAssignments(flattened);
+    
+    // Fetch programs for dropdown AND list
+    let programsQuery = supabase
       .from('programs')
-      .select('*');
+      .select('*')
+      .order('title');
+
+    if (!isAdmin && profile?.role === 'coach') {
+        programsQuery = programsQuery.eq('owner_coach_id', profile.id);
+    }
+
+    const { data: programsData } = await programsQuery;
+    setPrograms((programsData as Program[]) || []); // Fix: Populate programs list
     const map: Record<string, Program> = {};
     for (const p of programsData || []) map[p.id] = p;
     setProgramMap(map);
   };
+    
+  useEffect(() => {
+    if (!isAdmin && profile?.role !== 'coach') {
+        setLoading(false); // Ensure loading stops if not admin
+        return;
+    }
+    const fetchUsers = async () => {
+        // Explicitly select fields as requested
+      const { data: usersData } = await supabase
+        .from('profiles')
+        .select('id,email,full_name,role,coach_id,coach_code,coach_accepting_new')
+        .order('email');
+      setUsers((usersData as Profile[]) || []);
+    };
+    
+    // Parallel fetch
+    Promise.all([fetchUsers(), fetchAssignments()]).then(() => {
+        setLoading(false);
+    });
+  }, [isAdmin, profile, showQueued]);
 
   // Details / Progress helpers
   const openDetails = async (assignment: any) => {
@@ -283,10 +360,17 @@ useEffect(() => {
   const fetchData = async () => {
     setLoading(true);
     // Fetch programs
-    const { data: programsData } = await supabase
+    let query = supabase
       .from('programs')
       .select('*')
       .order('title');
+    
+    // If coach (and not super-admin), only show own programs
+    if (!isAdmin && profile?.role === 'coach') {
+        query = query.eq('owner_coach_id', profile.id);
+    }
+    
+    const { data: programsData } = await query;
     setPrograms((programsData as Program[]) || []);
 
     // Fetch users
@@ -367,6 +451,7 @@ useEffect(() => {
         await supabase.from('programs').insert({
           title: programTitle,
           description: programDescription || null,
+          owner_coach_id: (!isAdmin && profile?.role === 'coach') ? profile.id : null,
         });
       }
       setShowProgramForm(false);
@@ -549,7 +634,11 @@ const saveParsedToDb = async () => {
     setImportModal({ ...(importModal || {}), loading: true, error: null });
     try {
       const prog = importModal.edited.program || { title: 'Imported program', description: null };
-      const { data: programData, error: programError } = await supabase.from('programs').insert({ title: prog.title, description: prog.description || null }).select('id').single();
+      const { data: programData, error: programError } = await supabase.from('programs').insert({ 
+          title: prog.title, 
+          description: prog.description || null,
+          owner_coach_id: (!isAdmin && profile?.role === 'coach') ? profile.id : null
+      }).select('id').single();
       if (programError) throw programError;
       const programId = programData.id;
       // insert days
@@ -590,11 +679,11 @@ const saveParsedToDb = async () => {
     }
   };
 
-  if (!isAdmin) {
+  if (!isAdmin && profile?.role !== 'coach') {
     return (
       <Layout title="Admin" showBack>
         <div className="p-4 text-center">
-          <p className="text-red-400">Access denied. Admin privileges required.</p>
+          <p className="text-red-400">Access denied. Admin or Coach privileges required.</p>
           <Link to="/programs" className="text-blue-400 mt-4 inline-block">
             Back to Programs
           </Link>
@@ -622,7 +711,10 @@ const saveParsedToDb = async () => {
       <div className="p-4 pb-20">
         {/* Tabs */}
         <div className="flex gap-2 mb-6 overflow-x-auto">
-          {(['programs', 'users', 'assignments','manage-assignments'] as Tab[]).map((tab) => (
+          {((isAdmin 
+              ? ['programs', 'users', 'coaches', 'assignments', 'manage-assignments'] 
+              : ['programs', 'manage-assignments'] // Coach view
+            ) as Tab[]).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -632,7 +724,7 @@ const saveParsedToDb = async () => {
                   : 'bg-slate-800 text-slate-400 hover:text-white'
               }`}
             >
-              {tab}
+              {tab === 'manage-assignments' ? 'Trainee Progress' : tab}
             </button>
           ))}
         </div>
@@ -729,10 +821,10 @@ const saveParsedToDb = async () => {
             <tbody>
               {assignments.map((a: any) => (
                 <tr key={a.id} className="border-t border-slate-700">
-                  <td className="px-4 py-2">
-                    {users.find(u => u.id === a.user_id)?.email || a.user_email || a.user_id}
+                 <td className="px-4 py-2">
+                    {a.user_email || a.user?.email || users.find(u => u.id === a.user_id)?.email || a.user_id}
                   </td>
-                  <td className="px-4 py-2">{programMap[a.program_id]?.title || '—'}</td>
+                  <td className="px-4 py-2">{a.program_title || programMap[a.program_id]?.title || '—'}</td>
                   <td className="px-4 py-2">{a.state}</td>
                   <td className="px-4 py-2">{a.assigned_at ? new Date(a.assigned_at).toLocaleString() : a.created_at ? new Date(a.created_at).toLocaleString() : '-'}</td>
                   <td className="px-4 py-2">
@@ -774,6 +866,60 @@ const saveParsedToDb = async () => {
             {users.length === 0 && (
               <p className="text-center text-slate-500 py-8">No users yet</p>
             )}
+          </div>
+        )}
+
+
+
+        {/* Coaches Tab */}
+        {activeTab === 'coaches' && (
+          <div>
+            <h2 className="text-xl font-bold text-white mb-4">Coaches Management</h2>
+            <div className="overflow-auto bg-slate-800 rounded-lg p-2">
+              <table className="min-w-full text-left">
+                <thead>
+                  <tr className="text-slate-400 text-sm">
+                    <th className="px-4 py-2">Name</th>
+                    <th className="px-4 py-2">Email</th>
+                    <th className="px-4 py-2">Code</th>
+                    <th className="px-4 py-2">Status</th>
+                    <th className="px-4 py-2">Trainees</th>
+                    <th className="px-4 py-2">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {coaches.map((coach: any) => (
+                    <tr key={coach.id} className="border-t border-slate-700">
+                      <td className="px-4 py-2 font-medium text-white">{coach.full_name || '—'}</td>
+                      <td className="px-4 py-2">{coach.email}</td>
+                      <td className="px-4 py-2 font-mono text-blue-400">{coach.coach_code || '—'}</td>
+                      <td className="px-4 py-2">
+                        <span className={`px-2 py-1 rounded text-xs font-bold ${coach.coach_status === 'active' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>
+                           {coach.coach_status?.toUpperCase() || 'ACTIVE'}
+                        </span>
+                      </td>
+                       <td className="px-4 py-2">{coach.trainee_count || 0}</td>
+                      <td className="px-4 py-2">
+                        <div className="flex gap-2">
+                           <Link to={`/admin/coaches/${coach.id}`} className="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded text-sm transition-colors">
+                             Details
+                           </Link>
+                           <button 
+                             onClick={() => toggleCoachStatus(coach)}
+                             className={`px-3 py-1 rounded text-sm transition-colors text-white ${coach.coach_status === 'active' ? 'bg-red-600 hover:bg-red-500' : 'bg-green-600 hover:bg-green-500'}`}
+                           >
+                             {coach.coach_status === 'active' ? 'Deactivate' : 'Activate'}
+                           </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                  {coaches.length === 0 && (
+                      <tr><td colSpan={6} className="text-center py-8 text-slate-500">No coaches found</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
 
@@ -1317,11 +1463,12 @@ const saveParsedToDb = async () => {
 // Admin Days Management Page (nested)
 export function AdminDaysPage() {
   const { programId } = useParams<{ programId: string }>();
-  const { isAdmin } = useAuth();
+  const { canManagePrograms } = useAuth();
   const [program, setProgram] = useState<Program | null>(null);
   const [days, setDays] = useState<(Day & { exercises: Exercise[] })[]>([]);
   const [loading, setLoading] = useState(true);
 
+  // ... (state declarations)
   // Day form
   const [showDayForm, setShowDayForm] = useState(false);
   const [editingDay, setEditingDay] = useState<Day | null>(null);
@@ -1343,9 +1490,9 @@ export function AdminDaysPage() {
   
 
   useEffect(() => {
-    if (!isAdmin || !programId) return;
+    if (!canManagePrograms || !programId) return;
     fetchData();
-  }, [isAdmin, programId]);
+  }, [canManagePrograms, programId]);
 
   const fetchData = async () => {
     setLoading(true);
@@ -1372,6 +1519,15 @@ export function AdminDaysPage() {
     setDays(sortedDays as (Day & { exercises: Exercise[] })[]);
     setLoading(false);
   };
+  
+  // ... (saveDay, deleteDay etc - keep existing, just updating checks wrapper)
+  
+  // To avoid replacing huge block, I will just replace the top and bottom checks in separate operations if possible, 
+  // but "replace_file_content" requires contiguous block. 
+  // I will target the top part (useEffect) and the bottom part (render check) separately? 
+  // No, I can't do multiple replace in one tool call unless I use multi_replace.
+  // I will use multi_replace.
+
 
   const saveDay = async () => {
     if (editingDay) {
@@ -1448,7 +1604,7 @@ export function AdminDaysPage() {
     setExerciseVideoUrl('');
   };
 
-  if (!isAdmin) {
+  if (!canManagePrograms) {
     return (
       <Layout title="Admin" showBack>
         <div className="p-4 text-center">

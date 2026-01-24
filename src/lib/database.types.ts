@@ -14,6 +14,15 @@ export interface Database {
           id: string
           email: string
           full_name: string | null
+          role: 'admin' | 'coach' | 'trainee'
+          coach_id: string | null
+          coach_code: string | null
+          coach_accepting_new: boolean
+          coach_status: 'active' | 'deactivated' | null // New column
+          gender: string | null
+          birth_date: string | null
+          phone: string | null
+          avatar_url: string | null
           is_admin: boolean
           created_at: string
           updated_at: string
@@ -22,6 +31,15 @@ export interface Database {
           id: string
           email: string
           full_name?: string | null
+          role?: 'admin' | 'coach' | 'trainee'
+          coach_id?: string | null
+          coach_code?: string | null
+          coach_accepting_new?: boolean
+          coach_status?: 'active' | 'deactivated' | null
+          gender?: string | null
+          birth_date?: string | null
+          phone?: string | null
+          avatar_url?: string | null
           is_admin?: boolean
           created_at?: string
           updated_at?: string
@@ -30,6 +48,15 @@ export interface Database {
           id?: string
           email?: string
           full_name?: string | null
+          role?: string
+          coach_id?: string | null
+          coach_code?: string | null
+          coach_accepting_new?: boolean
+          coach_status?: 'active' | 'deactivated' | null
+          gender?: string | null
+          birth_date?: string | null
+          phone?: string | null
+          avatar_url?: string | null
           is_admin?: boolean
           created_at?: string
           updated_at?: string
@@ -42,6 +69,7 @@ export interface Database {
           description: string | null
           image_url: string | null
           created_by: string | null
+          owner_coach_id: string | null
           created_at: string
           updated_at: string
         }
@@ -51,6 +79,7 @@ export interface Database {
           description?: string | null
           image_url?: string | null
           created_by?: string | null
+          owner_coach_id?: string | null
           created_at?: string
           updated_at?: string
         }
@@ -60,6 +89,7 @@ export interface Database {
           description?: string | null
           image_url?: string | null
           created_by?: string | null
+          owner_coach_id?: string | null
           created_at?: string
           updated_at?: string
         }
@@ -69,18 +99,21 @@ export interface Database {
           id: string
           user_id: string
           program_id: string
+          coach_id: string | null
           assigned_at: string
         }
         Insert: {
           id?: string
           user_id: string
           program_id: string
+          coach_id?: string | null
           assigned_at?: string
         }
         Update: {
           id?: string
           user_id?: string
           program_id?: string
+          coach_id?: string | null
           assigned_at?: string
         }
       }
@@ -182,6 +215,7 @@ export interface Database {
           id: string;
           assignment_day_id: string;
           exercise_id: string;
+          user_id: string;
           done: boolean;
           done_at: string | null;
         };
@@ -189,6 +223,7 @@ export interface Database {
           id?: string;
           assignment_day_id: string;
           exercise_id: string;
+          user_id?: string;
           done?: boolean;
           done_at?: string | null;
         };
@@ -196,10 +231,40 @@ export interface Database {
           id?: string;
           assignment_day_id?: string;
           exercise_id?: string;
+          user_id?: string;
           done?: boolean;
           done_at?: string | null;
         };
       };
+      audit_logs: {
+        Row: {
+          id: string
+          actor_id: string | null
+          action: string
+          target_id: string | null
+          target_table: string | null
+          meta: Json
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          actor_id?: string | null
+          action: string
+          target_id?: string | null
+          target_table?: string | null
+          meta?: Json
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          actor_id?: string | null
+          action?: string
+          target_id?: string | null
+          target_table?: string | null
+          meta?: Json
+          created_at?: string
+        }
+      }
     }
     Views: {
       [_ in never]: never

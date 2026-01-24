@@ -9,8 +9,23 @@ interface AuthContextType {
   session: Session | null;
   loading: boolean;
   isAdmin: boolean;
-  signIn: (email: string, password: string) => Promise<{ error: Error | null }>;
-  signUp: (email: string, password: string, fullName?: string) => Promise<{ error: Error | null }>;
+  isCoach: boolean;
+  canManagePrograms: boolean;
+  signIn: (email: string, password: string) => Promise<{ data?: any; error: Error | null }>;
+  signUp: (
+    email: string,
+    password: string,
+    data?: {
+      fullName?: string;
+      role?: 'admin' | 'coach' | 'trainee';
+      coachId?: string;
+      coachCode?: string;
+      gender?: string;
+      birthDate?: string;
+      phone?: string;
+      avatarUrl?: string;
+    }
+  ) => Promise<{ data?: { user: User | null; session: Session | null } | null; error: Error | null }>;
   signOut: () => Promise<void>;
   refreshProfile: () => Promise<void>;
 }
@@ -22,6 +37,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
+
+  // ... (keep fetchProfile and fetchProfileDirect as is, omitted for brevity in tool call if possible, but I must match exact lines to replace)
+  // Actually I should just replace the interface and the signUp implementation and isAdmin logic.
+  // I will use multiple replace chunks.
+
 
   const fetchProfile = async (userId: string) => {
     try {
@@ -117,19 +137,41 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const signIn = async (email: string, password: string) => {
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    return { error: error as Error | null };
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    return { data, error: error as Error | null };
   };
 
-  const signUp = async (email: string, password: string, fullName?: string) => {
-    const { error } = await supabase.auth.signUp({
+  const signUp = async (
+    email: string, 
+    password: string, 
+    data?: {
+      fullName?: string;
+      role?: 'admin' | 'coach' | 'trainee';
+      coachId?: string;
+      coachCode?: string;
+      gender?: string;
+      birthDate?: string;
+      phone?: string;
+      avatarUrl?: string;
+    }
+  ) => {
+    const { data: authData, error } = await supabase.auth.signUp({
       email,
       password,
       options: {
-        data: { full_name: fullName },
+        data: {
+          full_name: data?.fullName,
+          role: data?.role ?? 'trainee',
+          coach_id: data?.coachId,
+          coach_code: data?.coachCode,
+          gender: data?.gender,
+          birth_date: data?.birthDate,
+          phone: data?.phone,
+          avatar_url: data?.avatarUrl,
+        },
       },
     });
-    return { error: error as Error | null };
+    return { data: authData, error: error as Error | null };
   };
 
   const signOut = async () => {
@@ -144,7 +186,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     profile,
     session,
     loading,
-    isAdmin: profile?.is_admin ?? false,
+    isAdmin: profile?.is_admin || profile?.role === 'admin' || false,
+    isCoach: profile?.role === 'coach' || false,
+    canManagePrograms: (profile?.role === 'admin' || profile?.is_admin || profile?.role === 'coach') || false,
     signIn,
     signUp,
     signOut,

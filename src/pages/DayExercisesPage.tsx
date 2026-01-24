@@ -26,71 +26,60 @@ export default function DayExercisesPage() {
         return;
       }
 
-      // 1. Fetch assignment_day (scheduled day)
-      console.log('[DayExercisesPage] Fetching assignment_day', { dayId });
-      const { data: assignmentDayData, error: assignmentDayError } = await supabase
+      // Fetch assignment_day with nested template day, exercises, and progress
+      const { data: assignmentData, error } = await supabase
         .from('assignment_days')
-        .select('*')
+        .select(`
+          *,
+          program_day:days (
+            *,
+            exercises (
+              *
+            )
+          ),
+          progress:assignment_exercise_progress (
+            exercise_id, done, done_at
+          )
+        `)
         .eq('id', dayId)
         .single();
-      if (assignmentDayError || !assignmentDayData) {
-        setError('Scheduled day not found');
+        
+      if (error || !assignmentData) {
+        console.error('Error fetching day:', error);
+        setError('Day not found');
         setLoading(false);
         return;
       }
-      setAssignmentDay(assignmentDayData);
-
-      // 2. Fetch program_day (template day)
-      console.log('[DayExercisesPage] Fetching program_day', { program_day_id: assignmentDayData.program_day_id });
-      const { data: programDayData, error: programDayError } = await supabase
-        .from('days')
-        .select('*')
-        .eq('id', assignmentDayData.program_day_id)
-        .single();
-      if (programDayError || !programDayData) {
-        setError('Template day not found');
-        setLoading(false);
-        return;
+      
+      setAssignmentDay(assignmentData);
+      
+      // Extract template day
+      const pDay = Array.isArray(assignmentData.program_day) ? assignmentData.program_day[0] : assignmentData.program_day;
+      if (!pDay) {
+          setError('Template day not found');
+          setLoading(false);
+          return;
       }
-      setProgramDay(programDayData);
-
-      // 3. Fetch exercises for this program_day
-      console.log('[DayExercisesPage] Fetching exercises', { program_day_id: assignmentDayData.program_day_id });
-      const { data: exercisesData, error: exercisesError } = await supabase
-        .from('exercises')
-        .select('*')
-        .eq('day_id', assignmentDayData.program_day_id)
-        .order('exercise_number');
-      if (exercisesError) {
-        setError('Failed to load exercises');
-        setLoading(false);
-        return;
-      }
-      const exercises = (exercisesData || []) as any[];
-      const exerciseIds = exercises.map((e: any) => e.id);
-
-      // 4. Fetch progress for this assignment_day
-      console.log('[DayExercisesPage] Fetching progress', { assignment_day_id: dayId, exerciseIds });
-      const { data: progressData, error: progressError } = await supabase
-        .from('assignment_exercise_progress')
-        .select('exercise_id, done, done_at')
-        .eq('assignment_day_id', dayId)
-        .in('exercise_id', exerciseIds);
-      if (progressError) {
-        console.error('Error fetching progress:', progressError);
-      }
-      // Map of exercise_id to progress row
-      const progressMap = new Map((progressData as any[] || []).map((p: any) => [p.exercise_id, p]));
-      const exercisesWithProgress: ExerciseWithAssignmentProgress[] = exercises.map((exercise: any) => ({
-        ...exercise,
-        progress: progressMap.get(exercise.id) || null,
-      }));
+      setProgramDay(pDay);
+      
+      // Process exercises and attach progress
+      const rawExercises = pDay.exercises || [];
+      rawExercises.sort((a: any, b: any) => a.exercise_number - b.exercise_number);
+      
+      const exercisesWithProgress = rawExercises.map((ex: any) => {
+          const prog = (assignmentData.progress || []).find((p: any) => p.exercise_id === ex.id);
+          return {
+              ...ex,
+              progress: prog || null
+          };
+      });
+      
       setExercises(exercisesWithProgress);
       setLoading(false);
     };
 
     fetchDayExercises();
-  }, [dayId, user]);
+  }, [dayId, user?.id]);
 
   const toggleExerciseDone = async (exerciseId: string, isDone: boolean) => {
     if (!user || !dayId) return;
@@ -104,6 +93,7 @@ export default function DayExercisesPage() {
       .upsert({
         assignment_day_id: assignmentDayId,
         exercise_id: exerciseId,
+        user_id: user.id, // Ensure user_id matches auth
         done: nextDone,
         done_at: nextDone ? new Date().toISOString() : null,
       }, { onConflict: 'assignment_day_id,exercise_id' })
@@ -126,6 +116,7 @@ export default function DayExercisesPage() {
             id: prev?.id ?? '', // fallback to empty string if not present
             assignment_day_id: prev?.assignment_day_id ?? dayId,
             exercise_id: e.id,
+            user_id: user.id,
             done: true,
             done_at: new Date().toISOString(),
           },
