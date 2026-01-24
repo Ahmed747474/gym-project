@@ -15,7 +15,15 @@ CREATE TABLE profiles (
   id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
   email TEXT NOT NULL,
   full_name TEXT,
-  is_admin BOOLEAN DEFAULT FALSE,
+  role TEXT DEFAULT 'trainee' CHECK (role IN ('admin', 'coach', 'trainee')),
+  coach_id UUID REFERENCES profiles(id) ON DELETE SET NULL,
+  coach_code TEXT UNIQUE,
+  coach_accepting_new BOOLEAN DEFAULT FALSE,
+  gender TEXT,
+  birth_date DATE,
+  phone TEXT,
+  avatar_url TEXT,
+  is_admin BOOLEAN DEFAULT FALSE, -- Deprecated in favor of role='admin'
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -26,7 +34,8 @@ CREATE TABLE programs (
   title TEXT NOT NULL,
   description TEXT,
   image_url TEXT,
-  created_by UUID REFERENCES profiles(id) ON DELETE SET NULL,
+  created_by UUID REFERENCES profiles(id) ON DELETE SET NULL, -- Original creator
+  owner_coach_id UUID REFERENCES profiles(id) ON DELETE SET NULL, -- Coach who owns this program
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -36,6 +45,7 @@ CREATE TABLE user_programs (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   user_id UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
   program_id UUID NOT NULL REFERENCES programs(id) ON DELETE CASCADE,
+  coach_id UUID REFERENCES profiles(id) ON DELETE SET NULL, -- Coach who assigned this
   assigned_at TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE(user_id, program_id)
 );
@@ -105,7 +115,14 @@ ALTER TABLE exercise_progress ENABLE ROW LEVEL SECURITY;
 -- Users can always view and update their own profile
 CREATE POLICY "Users can view own profile"
   ON profiles FOR SELECT
-  USING (auth.uid() = id);
+  USING (
+    auth.uid() = id
+    OR 
+    (EXISTS ( -- Coaches can view their trainees
+      SELECT 1 FROM profiles AS p 
+      WHERE p.id = profiles.id AND p.coach_id = auth.uid()
+    ))
+  );
 
 CREATE POLICY "Users can update own profile"
   ON profiles FOR UPDATE
@@ -117,7 +134,7 @@ RETURNS BOOLEAN AS $$
 BEGIN
   RETURN EXISTS (
     SELECT 1 FROM profiles 
-    WHERE id = auth.uid() AND is_admin = TRUE
+    WHERE id = auth.uid() AND (is_admin = TRUE OR role = 'admin')
   );
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER STABLE;
@@ -139,7 +156,11 @@ CREATE POLICY "Users can view assigned programs"
 
 CREATE POLICY "Admins can view all programs"
   ON programs FOR SELECT
-  USING (public.is_admin());
+  USING (public.is_admin() OR role = 'admin'); -- Assuming we migrate is_admin function to check role too
+
+CREATE POLICY "Coaches can view/update own programs"
+  ON programs FOR ALL
+  USING (owner_coach_id = auth.uid());
 
 CREATE POLICY "Admins can create programs"
   ON programs FOR INSERT
@@ -161,6 +182,10 @@ CREATE POLICY "Users can view own assignments"
 CREATE POLICY "Admins can view all assignments"
   ON user_programs FOR SELECT
   USING (public.is_admin());
+
+CREATE POLICY "Coaches can CRUD own assignments"
+  ON user_programs FOR ALL
+  USING (coach_id = auth.uid());
 
 CREATE POLICY "Admins can create assignments"
   ON user_programs FOR INSERT
@@ -254,11 +279,18 @@ CREATE POLICY "Admins can view all progress"
 CREATE OR REPLACE FUNCTION handle_new_user()
 RETURNS TRIGGER AS $$
 BEGIN
-  INSERT INTO profiles (id, email, full_name)
+  INSERT INTO profiles (id, email, full_name, role, coach_id, coach_code, gender, birth_date, phone, avatar_url)
   VALUES (
     NEW.id,
     NEW.email,
-    COALESCE(NEW.raw_user_meta_data->>'full_name', '')
+    COALESCE(NEW.raw_user_meta_data->>'full_name', ''),
+    COALESCE(NEW.raw_user_meta_data->>'role', 'trainee'),
+    (NEW.raw_user_meta_data->>'coach_id')::UUID,
+    COALESCE(NEW.raw_user_meta_data->>'coach_code', NULL),
+    COALESCE(NEW.raw_user_meta_data->>'gender', NULL),
+    COALESCE(NEW.raw_user_meta_data->>'birth_date', NULL)::DATE,
+    COALESCE(NEW.raw_user_meta_data->>'phone', NULL),
+    COALESCE(NEW.raw_user_meta_data->>'avatar_url', NULL)
   );
   RETURN NEW;
 END;

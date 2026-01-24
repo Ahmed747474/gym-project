@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import { supabase } from '../lib/supabase';
 
 export default function LoginPage() {
   const [email, setEmail] = useState('');
@@ -15,12 +16,25 @@ export default function LoginPage() {
     setError('');
     setLoading(true);
 
-    const { error } = await signIn(email, password);
+    const { data, error } = await signIn(email, password);
     
     if (error) {
       setError(error.message);
       setLoading(false);
     } else {
+      // Log login
+      if (data?.user) {
+        await supabase.from('audit_logs').insert({
+          actor_id: data.user.id,
+          action: 'LOGIN',
+          target_id: data.user.id,
+          target_table: 'profiles',
+          meta: { 
+            email: data.user.email,
+            user_agent: navigator.userAgent
+          }
+        });
+      }
       navigate('/programs');
     }
   };

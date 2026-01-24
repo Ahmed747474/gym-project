@@ -76,12 +76,31 @@ export default function ProgramDetailsPage() {
       }
       setTargetCycles(assignmentData.target_cycles || 0);
 
-      // Fetch all assignment_days for this assignment, ordered by scheduled_date
-      const { data: assignmentDays } = await supabase
+      // Fetch all assignment_days for this assignment, with program days and exercises nested!
+      // This matches the user request for (days + exercises) in one query, but anchored on assignment_days
+      const { data: assignmentDays, error: daysError } = await supabase
         .from('assignment_days')
-        .select('*')
+        .select(`
+          *,
+          program_day:days (
+            id, day_number, title, description,
+            exercises (
+              id, exercise_number, name, sets, reps, rest_seconds, notes, video_url
+            )
+          ),
+          progress:assignment_exercise_progress(
+             exercise_id, done
+          )
+        `)
         .eq('assignment_id', assignmentData.id)
         .order('scheduled_date', { ascending: true });
+
+      if (daysError) {
+          console.error('Error fetching days:', daysError);
+          setLoading(false);
+          return;
+      }
+
       if (!assignmentDays || assignmentDays.length === 0) {
         setRepeatGroups([]);
         setStatusMsg('Assignment days not generated yet.');
@@ -89,101 +108,72 @@ export default function ProgramDetailsPage() {
         return;
       }
 
-      // Determine template program_day_ids referenced by the generated assignment_days
-      const programDayIds = Array.from(new Set((assignmentDays || []).map((ad: any) => ad.program_day_id).filter(Boolean)));
-      // Fetch template days referenced by the assignment days
-      let allProgramDays: any[] = [];
-      if (programDayIds.length > 0) {
-        const { data: pd } = await supabase
-          .from('days')
-          .select('*')
-          .in('id', programDayIds);
-        allProgramDays = pd || [];
-      }
-      const programDayMap = new Map((allProgramDays || []).map((d: any) => [d.id, d]));
-
-      // Fetch all exercises for the referenced program days
-      let allExercises: any[] = [];
-      if (programDayIds.length > 0) {
-        const { data: exs } = await supabase
-          .from('exercises')
-          .select('*')
-          .in('day_id', programDayIds);
-        allExercises = exs || [];
-      }
-      // Map day_id to exercises
-      const exercisesByDay = new Map();
-      for (const ex of allExercises) {
-        if (!exercisesByDay.has(ex.day_id)) exercisesByDay.set(ex.day_id, []);
-        exercisesByDay.get(ex.day_id).push(ex);
-      }
-
-      // Fetch all assignment_exercise_progress for these assignment_days in one query
-      const assignmentDayIds = assignmentDays.map((ad: any) => ad.id);
-      let allProgress: any[] = [];
-      if (assignmentDayIds.length > 0) {
-        const { data: progress } = await supabase
-          .from('assignment_exercise_progress')
-          .select('*')
-          .in('assignment_day_id', assignmentDayIds);
-        allProgress = progress || [];
-      }
-      const progressMap = new Map(
-        (allProgress || []).map((p: any) => [`${p.assignment_day_id}_${p.exercise_id}`, p])
-      );
-
-      // Build `days` (template days list) for JumpToInput based on template days referenced
-      const daysWithInfo: DayWithCompletion[] = (allProgramDays || []).map((d: any) => {
-        const exercises = (allExercises || []).filter((ex: any) => ex.day_id === d.id) || [];
-        const exerciseCount = exercises.length;
-        return { ...d, exerciseCount, completion: 0 } as DayWithCompletion;
-      });
-      setDays(daysWithInfo);
-
-      // Group assignment_days by repeat_no
+      // Pre-process Data
+      // Map exercises from the nested program_day, and attach progress
+      const processedGroups: any[] = [];
+      
+      // Group by repeat_no
       const repeatMap = new Map();
       for (const ad of assignmentDays) {
         if (!repeatMap.has(ad.repeat_no)) repeatMap.set(ad.repeat_no, []);
-        repeatMap.get(ad.repeat_no).push(ad);
+        
+        // Prepare exercises with progress
+        // ad.program_day might be an array or object depending on One-to-One vs Many
+        // It's a foreign key, so it should be an object (single).
+        // ad.progress is array of progress rows for this day
+        const pDay = Array.isArray(ad.program_day) ? ad.program_day[0] : ad.program_day;
+        const rawExercises = pDay?.exercises || [];
+        
+        // Sort exercises
+        rawExercises.sort((a: any, b: any) => a.exercise_number - b.exercise_number);
+
+        const exercisesWithProgress = rawExercises.map((ex: any) => {
+            const prog = (ad.progress || []).find((p: any) => p.exercise_id === ex.id);
+            return {
+                ...ex,
+                progress: prog || null
+            };
+        });
+
+        const dayObj = {
+            assignment_day: ad,
+            program_day: pDay,
+            exercises: exercisesWithProgress
+        };
+        repeatMap.get(ad.repeat_no).push(dayObj);
       }
 
-      // Compute completed cycles: a cycle is complete if all assignment_days in that repeat_no have status 'done'
-      let completed = 0;
+      // Build groups array
       for (let i = 1; i <= (assignmentData.target_cycles || 0); i++) {
-        const daysForRepeat = repeatMap.get(i) || [];
-        if (daysForRepeat.length > 0 && daysForRepeat.every((d: any) => d.status === 'done')) {
-          completed++;
-        }
+         const daysArr = repeatMap.get(i) || [];
+         processedGroups.push({ repeat_no: i, days: daysArr });
+      }
+
+      // Compute completed cycles
+      let completed = 0;
+      for (const group of processedGroups) {
+          if (group.days.length > 0 && group.days.every((d: any) => d.assignment_day.status === 'done')) {
+              completed++;
+          }
       }
       setCompletedCycles(completed);
-
-      // For each repeat, build group with days and exercises (all in-memory)
-      const repeatGroupsArr = [];
-      for (let i = 1; i <= (assignmentData.target_cycles || 0); i++) {
-        const daysArr = repeatMap.get(i) || [];
-        const group = daysArr.map((ad: any) => {
-          if (!ad.program_day_id) {
-            return { assignment_day: ad, program_day: null, exercises: [] };
+      setRepeatGroups(processedGroups);
+      
+      // Build days list for JumpTo (unique template days)
+      const uniqueTemplateDays = new Map();
+      for (const ad of assignmentDays) {
+          // extract pDay again
+          const pDay = Array.isArray(ad.program_day) ? ad.program_day[0] : ad.program_day;
+          if (pDay && !uniqueTemplateDays.has(pDay.id)) {
+              uniqueTemplateDays.set(pDay.id, {
+                  ...pDay,
+                  exerciseCount: (pDay.exercises || []).length,
+                  completion: 0
+              });
           }
-          const programDay = programDayMap.get(ad.program_day_id) || null;
-          const exercises = exercisesByDay.get(ad.program_day_id) || [];
-          const exercisesWithProgress = (exercises || []).map((ex: any) => ({
-            ...ex,
-            progress: progressMap.get(`${ad.id}_${ex.id}`) || null,
-          }));
-          return {
-            assignment_day: ad,
-            program_day: programDay,
-            exercises: exercisesWithProgress,
-          };
-        });
-        // Do not filter out days here — include all scheduled days so exercises
-        // or the lack thereof are visible for debugging and UX.
-        const filtered = group; // keep empty exercises arrays for visibility
-        repeatGroupsArr.push({ repeat_no: i, days: filtered });
       }
-      console.log('ProgramDetails: repeatGroupsArr=', repeatGroupsArr);
-      setRepeatGroups(repeatGroupsArr);
+      setDays(Array.from(uniqueTemplateDays.values()).sort((a: any, b: any) => a.day_number - b.day_number));
+      
       setLoading(false);
     };
     fetchProgramDetails();

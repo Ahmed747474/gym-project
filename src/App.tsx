@@ -1,10 +1,14 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import ProtectedRoute from './components/ProtectedRoute';
 import { AuthProvider } from './contexts/AuthContext';
+import AdminCoachDetailsPage from './pages/AdminCoachDetailsPage';
 import AdminPage, { AdminDaysPage } from './pages/AdminPage';
+import AdminTraineeDetailsPage from './pages/AdminTraineeDetailsPage';
+import CoachDashboard from './pages/CoachDashboard';
 import DayExercisesPage from './pages/DayExercisesPage';
 import ExercisePlayerPage from './pages/ExercisePlayerPage';
 import LoginPage from './pages/LoginPage';
+import ProfilePage from './pages/ProfilePage';
 import ProgramDetailsPage from './pages/ProgramDetailsPage';
 import ProgramsPage from './pages/ProgramsPage';
 import SignupPage from './pages/SignupPage';
@@ -25,8 +29,12 @@ function App() {
             <Route path="/programs/:programId/days/:dayId" element={<DayExercisesPage />} />
             <Route path="/programs/:programId/days/:assignmentDayId/exercises/:exerciseId" element={<ExercisePlayerPage />} />
             {/* Admin routes */}
+            <Route path="/coach" element={<CoachDashboard />} />
             <Route path="/admin" element={<AdminPage />} />
+            <Route path="/admin/coaches/:coachId" element={<AdminCoachDetailsPage />} />
+            <Route path="/admin/trainees/:traineeId" element={<AdminTraineeDetailsPage />} />
             <Route path="/admin/programs/:programId/days" element={<AdminDaysPage />} />
+            <Route path="/profile" element={<ProfilePage />} />
           </Route>
           {/* Workout Home route */}
           <Route path="/workout" element={<WorkoutHome />} />

@@ -4,7 +4,7 @@ export async function toggleAssignmentExerciseDone(assignmentDayId: string, exer
   const doneAt = done ? new Date().toISOString() : null;
   await supabase
     .from('assignment_exercise_progress')
-    .upsert({ assignment_day_id: assignmentDayId, exercise_id: exerciseId, done, done_at: doneAt }, { onConflict: 'assignment_day_id,exercise_id' });
+    .upsert({ assignment_day_id: assignmentDayId, exercise_id: exerciseId, user_id: userId, done, done_at: doneAt }, { onConflict: 'assignment_day_id,exercise_id' });
 
   // 2. Recompute assignment day status
   // Fetch assignment_day row

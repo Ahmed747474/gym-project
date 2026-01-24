@@ -115,24 +115,40 @@ export default function ExercisePlayerPage() {
     if (!user || !exercise || !assignmentDayId) return;
 
     // Toggle progress for this assignment_day and exercise
+
+    // Actually, usually we just want to mark done or not done. 
+    // If "done" is true, upsert. If "done" is false, we can delete or update 'done' to false.
+    // The current UI button says "Done!" or "Mark as Done".
+    
     if (progress) {
-      await supabase
+       // Toggle to off -> Delete row or set done=false
+       // User prompt said "Insert/upsert policy is missing... Always upsert with correct onConflict".
+       // If we want to "undo", we can delete.
+       await supabase
         .from('assignment_exercise_progress')
         .delete()
         .eq('id', progress.id);
-      setProgress(null);
+       setProgress(null);
     } else {
-      const { data } = await supabase
+       // Toggle to on -> Upsert
+       const { data, error } = await supabase
         .from('assignment_exercise_progress')
-        .insert({
+        .upsert({
           assignment_day_id: assignmentDayId,
           exercise_id: exercise.id,
+          user_id: user.id, // Explicitly send user_id for RLS
           done: true,
           done_at: new Date().toISOString(),
-        } as any)
+        }, { onConflict: 'assignment_day_id,exercise_id' })
         .select()
         .single();
-      setProgress(data as any);
+        
+       if (error) {
+           console.error('Error marking done:', error);
+           setError('Failed to save progress');
+       } else {
+           setProgress(data);
+       }
     }
 
     // After toggling, check if all exercises for this assignment_day are done
